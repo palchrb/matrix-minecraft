@@ -105,7 +105,22 @@ func (c *MCClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*b
 	return &bridgev2.ChatInfo{
 		Name: &name,
 		Type: ptrTo(database.RoomTypeDefault),
+		Members: &bridgev2.ChatMemberList{
+			IsFull: true,
+			Members: []bridgev2.ChatMember{{
+				EventSender: bridgev2.EventSender{
+					IsFromMe: true,
+					Sender:   networkid.UserID(c.UserLogin.UserMXID),
+				},
+				Membership: event.MembershipJoin,
+				PowerLevel: ptrInt(50),
+			}},
+		},
 	}, nil
+}
+
+func ptrInt(v int) *int {
+	return &v
 }
 
 func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {

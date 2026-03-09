@@ -14,8 +14,13 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// chatRegex matches Minecraft server chat lines in various log formats:
+//   - Vanilla:    [HH:MM:SS] [Server thread/INFO]: <PlayerName> message
+//   - Paper/etc:  [HH:MM:SS INFO]: <PlayerName> message
+//   - Not Secure: [HH:MM:SS INFO]: [Not Secure] <PlayerName> message
+//   - Floodgate:  player names may start with '.' (e.g. .palchrb)
 var chatRegex = regexp.MustCompile(
-	`^\[\d{2}:\d{2}:\d{2}\] \[[^\]]+/INFO\]: <([A-Za-z0-9_]{1,16})> (.+)$`,
+	`^\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) (?:\[Not Secure\] )?<([A-Za-z0-9_.]{1,16})> (.+)$`,
 )
 
 type ChatLine struct {
