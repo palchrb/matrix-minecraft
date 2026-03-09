@@ -1,0 +1,11 @@
+.env
+data/
+*.db
+config.yaml
+registration.yaml
+mc-bridge
+/matrix-minecraft
+*.exe
+.idea/
+.vscode/
+*.swp
