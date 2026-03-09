@@ -77,22 +77,32 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 	}
 	defer reader.Close()
 
-	// Docker multiplexer stdout/stderr med 8-bytes binær header per linje.
-	// stdcopy.StdCopy demultiplexer dette korrekt.
-	pr, pw := io.Pipe()
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer pw.Close()
-		if _, err := stdcopy.StdCopy(pw, io.Discard, reader); err != nil {
-			if ctx.Err() == nil {
-				t.log.Warn().Err(err).Msg("stdcopy avsluttet")
+	// Check if the container uses TTY mode. With TTY enabled, Docker sends
+	// raw output without multiplexing headers, so stdcopy must be skipped.
+	var logReader io.Reader
+	info, inspectErr := t.docker.ContainerInspect(ctx, t.containerName)
+	if inspectErr != nil || !info.Config.Tty {
+		// Non-TTY: Docker multiplexes stdout/stderr with 8-byte binary headers.
+		pr, pw := io.Pipe()
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer pw.Close()
+			if _, err := stdcopy.StdCopy(pw, io.Discard, reader); err != nil {
+				if ctx.Err() == nil {
+					t.log.Warn().Err(err).Msg("stdcopy avsluttet")
+				}
 			}
-		}
-	}()
+		}()
+		logReader = pr
+		defer func() { wg.Wait() }()
+	} else {
+		// TTY mode: raw output, read directly.
+		logReader = reader
+	}
 
-	scanner := bufio.NewScanner(pr)
+	scanner := bufio.NewScanner(logReader)
 	for scanner.Scan() {
 		if m := chatRegex.FindStringSubmatch(scanner.Text()); m != nil {
 			select {
@@ -108,6 +118,5 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 		}
 	}
 
-	wg.Wait()
 	return scanner.Err()
 }
