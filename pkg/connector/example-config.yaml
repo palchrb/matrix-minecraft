@@ -1,0 +1,21 @@
+# Docker socket path
+docker_host: unix:///var/run/docker.sock
+
+# Label-prefix brukt på MC-containere
+label_prefix: mc-bridge
+
+# Standard RCON-port hvis ikke overstyrt via mc-bridge.rcon-port label
+default_rcon_port: 25575
+
+# Meldingsformatering i Minecraft (tellraw JSON-farger)
+prefix_text: "[Matrix]"
+prefix_color: light_purple
+sender_color: aqua
+message_color: white
+
+# Provisioning secret – sett gjerne via PROVISIONING_SECRET env-variabel
+# istedenfor her, for å unngå at secret havner i config-filen
+provisioning_secret: ""
+
+# Avatar API URL (%s erstattes med MC-brukernavn)
+avatar_api_url: "https://mc-heads.net/avatar/%s/100"
