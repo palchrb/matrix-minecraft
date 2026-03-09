@@ -31,15 +31,10 @@ fi
 cd /data
 fixperms
 
-# Create user/group so supplementary groups (e.g. docker) work
-addgroup -g $GID mcbridge 2>/dev/null
-adduser -D -u $UID -G mcbridge -h /data mcbridge 2>/dev/null
-
-# If docker socket exists, ensure our user can access it
+# If docker socket exists, make it accessible to our unprivileged user.
+# su-exec does not set supplementary groups, so group_add alone is not enough.
 if [ -S /var/run/docker.sock ]; then
-	DOCKER_SOCK_GID=$(stat -c '%g' /var/run/docker.sock)
-	addgroup -g $DOCKER_SOCK_GID docker 2>/dev/null
-	addgroup mcbridge docker 2>/dev/null
+	chown $UID /var/run/docker.sock
 fi
 
 exec su-exec $UID:$GID /usr/bin/matrix-minecraft
