@@ -23,11 +23,45 @@ var chatRegex = regexp.MustCompile(
 	`^\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) (?:\[Not Secure\] )?<([A-Za-z0-9_.]{1,16})> (.+)$`,
 )
 
+// joinLeaveRegex matches join/leave messages:
+//   [HH:MM:SS] [Server thread/INFO]: PlayerName joined the game
+//   [HH:MM:SS] [Server thread/INFO]: PlayerName left the game
+var joinLeaveRegex = regexp.MustCompile(
+	`^\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) ([A-Za-z0-9_.]{1,16}) (joined the game|left the game)$`,
+)
+
+// deathRegex matches death messages. Minecraft death messages always start with the player name
+// followed by a death message verb (was slain, was shot, drowned, fell, etc.)
+// Captures: [1] player name, [2] full death message after player name
+var deathRegex = regexp.MustCompile(
+	`^\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) ([A-Za-z0-9_.]{1,16}) ((?:was slain|was shot|was killed|was fireballed|was pummeled|was squished|was squashed|drowned|blew up|was blown up|was burnt|went up in flames|walked into fire|burned to death|tried to swim in lava|suffocated in a wall|starved to death|fell from|fell off|fell out of|hit the ground|was doomed to fall|was struck by lightning|froze to death|was impaled|was stung to death|was obliterated|discovered the floor was lava|didn't want to live|experienced kinetic energy|withered away|died|was poked to death|was killed by).+)$`,
+)
+
+// advancementRegex matches advancement/achievement messages:
+//   [HH:MM:SS] [Server thread/INFO]: PlayerName has made the advancement [Advancement Name]
+//   [HH:MM:SS] [Server thread/INFO]: PlayerName has completed the challenge [Challenge Name]
+//   [HH:MM:SS] [Server thread/INFO]: PlayerName has reached the goal [Goal Name]
+var advancementRegex = regexp.MustCompile(
+	`^\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) ([A-Za-z0-9_.]{1,16}) (has (?:made the advancement|completed the challenge|reached the goal) \[.+\])$`,
+)
+
+// EventType angir hvilken type hendelse en ChatLine representerer.
+type EventType int
+
+const (
+	EventChat        EventType = iota // Vanlig chat-melding
+	EventJoin                         // Spiller logget inn
+	EventLeave                        // Spiller logget ut
+	EventDeath                        // Spiller døde
+	EventAdvancement                  // Spiller fikk en advancement
+)
+
 type ChatLine struct {
 	PlayerName    string
 	Message       string
 	Timestamp     time.Time
 	ContainerName string
+	Event         EventType
 }
 
 type LogTailer struct {
@@ -109,14 +143,44 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 
 	scanner := bufio.NewScanner(logReader)
 	for scanner.Scan() {
-		if m := chatRegex.FindStringSubmatch(scanner.Text()); m != nil {
+		line := scanner.Text()
+		var cl *ChatLine
+
+		if m := chatRegex.FindStringSubmatch(line); m != nil {
+			cl = &ChatLine{
+				PlayerName: m[1],
+				Message:    m[2],
+				Event:      EventChat,
+			}
+		} else if m := joinLeaveRegex.FindStringSubmatch(line); m != nil {
+			evt := EventJoin
+			if m[2] == "left the game" {
+				evt = EventLeave
+			}
+			cl = &ChatLine{
+				PlayerName: m[1],
+				Message:    m[2],
+				Event:      evt,
+			}
+		} else if m := deathRegex.FindStringSubmatch(line); m != nil {
+			cl = &ChatLine{
+				PlayerName: m[1],
+				Message:    m[2],
+				Event:      EventDeath,
+			}
+		} else if m := advancementRegex.FindStringSubmatch(line); m != nil {
+			cl = &ChatLine{
+				PlayerName: m[1],
+				Message:    m[2],
+				Event:      EventAdvancement,
+			}
+		}
+
+		if cl != nil {
+			cl.Timestamp = time.Now()
+			cl.ContainerName = t.containerName
 			select {
-			case lineCh <- ChatLine{
-				PlayerName:    m[1],
-				Message:       m[2],
-				Timestamp:     time.Now(),
-				ContainerName: t.containerName,
-			}:
+			case lineCh <- *cl:
 			case <-ctx.Done():
 				return nil
 			}

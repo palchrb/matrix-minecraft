@@ -252,7 +252,8 @@ func (c *MCClient) handleChatLine(line ChatLine) {
 	c.log.Debug().
 		Str("player", line.PlayerName).
 		Str("message", line.Message).
-		Msg("Minecraft chat-melding mottatt")
+		Int("event", int(line.Event)).
+		Msg("Minecraft hendelse mottatt")
 
 	c.UserLogin.Bridge.QueueRemoteEvent(c.UserLogin, &simplevent.Message[ChatLine]{
 		EventMeta: simplevent.EventMeta{
@@ -260,7 +261,8 @@ func (c *MCClient) handleChatLine(line ChatLine) {
 			LogContext: func(ctx zerolog.Context) zerolog.Context {
 				return ctx.
 					Str("player", line.PlayerName).
-					Str("container", line.ContainerName)
+					Str("container", line.ContainerName).
+					Int("event_type", int(line.Event))
 			},
 			PortalKey:    makePortalKey(line.ContainerName),
 			Sender:       bridgev2.EventSender{Sender: networkid.UserID(line.PlayerName)},
@@ -271,12 +273,30 @@ func (c *MCClient) handleChatLine(line ChatLine) {
 		ID:   networkid.MessageID(fmt.Sprintf("mc-%s-%d", line.PlayerName, line.Timestamp.UnixNano())),
 		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal,
 			intent bridgev2.MatrixAPI, data ChatLine) (*bridgev2.ConvertedMessage, error) {
+			msgType := event.MsgText
+			body := data.Message
+
+			switch data.Event {
+			case EventJoin:
+				msgType = event.MsgNotice
+				body = "☑ " + data.PlayerName + " " + data.Message
+			case EventLeave:
+				msgType = event.MsgNotice
+				body = "☐ " + data.PlayerName + " " + data.Message
+			case EventDeath:
+				msgType = event.MsgNotice
+				body = "☠ " + data.PlayerName + " " + data.Message
+			case EventAdvancement:
+				msgType = event.MsgNotice
+				body = "🏆 " + data.PlayerName + " " + data.Message
+			}
+
 			return &bridgev2.ConvertedMessage{
 				Parts: []*bridgev2.ConvertedMessagePart{{
 					Type: event.EventMessage,
 					Content: &event.MessageEventContent{
-						MsgType: event.MsgText,
-						Body:    data.Message,
+						MsgType: msgType,
+						Body:    body,
 					},
 				}},
 			}, nil
