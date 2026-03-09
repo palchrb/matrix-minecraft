@@ -56,6 +56,20 @@ func (c *MCClient) Connect(ctx context.Context) {
 	go c.LogTailer.Start(tailCtx, c.lineCh)
 	go c.receiveLoop(tailCtx)
 
+	// Ensure the portal (Matrix room) exists for this server
+	portalKey := makePortalKey(c.Meta.ContainerName)
+	portal, err := c.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
+	if err != nil {
+		c.log.Warn().Err(err).Msg("Kunne ikke hente portal")
+	} else if portal.MXID == "" {
+		chatInfo, _ := c.GetChatInfo(ctx, portal)
+		if createErr := portal.CreateMatrixRoom(ctx, c.UserLogin, chatInfo); createErr != nil {
+			c.log.Warn().Err(createErr).Msg("Kunne ikke opprette Matrix-rom")
+		} else {
+			c.log.Info().Str("room", string(portal.MXID)).Msg("Matrix-rom opprettet for server")
+		}
+	}
+
 	c.UserLogin.BridgeState.Send(status.BridgeState{
 		StateEvent: status.StateConnected,
 	})
