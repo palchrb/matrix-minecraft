@@ -130,34 +130,57 @@ func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bri
 		Name: &username,
 	}
 
-	// Hent avatar fra MC-heads API
+	// Hent avatar fra MC-heads API.
+	// Siden AggressiveUpdateInfo er aktivert kalles denne på hver melding,
+	// så vi sjekker om ghosten allerede har avatar satt for å unngå
+	// unødvendige HTTP-kall (bare re-sjekk hvert 6. time).
 	if c.AvatarFetch != nil {
 		var lastMod time.Time
+		var skipFetch bool
 		if meta, ok := ghost.Metadata.(*GhostMetadata); ok {
 			lastMod = meta.AvatarLastModified
-		}
-		result, err := c.AvatarFetch.Fetch(ctx, username, lastMod)
-		if err != nil {
-			c.log.Warn().Err(err).Str("player", username).
-				Msg("Avatar-henting feilet")
-		} else if result.Changed && result.Data != nil {
-			info.Avatar = &bridgev2.Avatar{
-				ID: networkid.AvatarID(fmt.Sprintf("mc-avatar-%s-%d",
-					username, result.LastModified.Unix())),
-				Get: func(ctx context.Context) ([]byte, error) {
-					return result.Data, nil
-				},
+			// Hvis avatar allerede er satt og ikke eldre enn 6 timer, ikke hent på nytt
+			if ghost.AvatarSet && !lastMod.IsZero() &&
+				time.Since(lastMod) < 6*time.Hour {
+				skipFetch = true
 			}
-			info.ExtraUpdates = bridgev2.MergeExtraUpdaters(info.ExtraUpdates,
-				func(ctx context.Context, ghost *bridgev2.Ghost) bool {
-					meta, ok := ghost.Metadata.(*GhostMetadata)
-					if !ok {
-						return false
-					}
-					meta.AvatarLastModified = result.LastModified
-					meta.AvatarValid = result.AccountValid
-					return true
-				})
+		}
+		if !skipFetch {
+			c.log.Debug().Str("player", username).
+				Time("last_modified", lastMod).
+				Bool("avatar_set", ghost.AvatarSet).
+				Msg("Henter avatar")
+			result, err := c.AvatarFetch.Fetch(ctx, username, lastMod)
+			if err != nil {
+				c.log.Warn().Err(err).Str("player", username).
+					Msg("Avatar-henting feilet")
+			} else if result.Changed && result.Data != nil {
+				c.log.Debug().Str("player", username).
+					Int("bytes", len(result.Data)).
+					Msg("Ny avatar mottatt, laster opp")
+				info.Avatar = &bridgev2.Avatar{
+					ID: networkid.AvatarID(fmt.Sprintf("mc-avatar-%s-%d",
+						username, result.LastModified.Unix())),
+					Get: func(ctx context.Context) ([]byte, error) {
+						return result.Data, nil
+					},
+				}
+				info.ExtraUpdates = bridgev2.MergeExtraUpdaters(info.ExtraUpdates,
+					func(ctx context.Context, ghost *bridgev2.Ghost) bool {
+						meta, ok := ghost.Metadata.(*GhostMetadata)
+						if !ok {
+							return false
+						}
+						meta.AvatarLastModified = result.LastModified
+						meta.AvatarValid = result.AccountValid
+						return true
+					})
+			} else {
+				c.log.Debug().Str("player", username).
+					Bool("changed", result.Changed).
+					Bool("valid", result.AccountValid).
+					Msg("Avatar uendret eller ingen data")
+			}
 		}
 	}
 
@@ -229,7 +252,8 @@ func (c *MCClient) handleChatLine(line ChatLine) {
 	c.log.Debug().
 		Str("player", line.PlayerName).
 		Str("message", line.Message).
-		Msg("Minecraft chat-melding mottatt")
+		Int("event", int(line.Event)).
+		Msg("Minecraft hendelse mottatt")
 
 	c.UserLogin.Bridge.QueueRemoteEvent(c.UserLogin, &simplevent.Message[ChatLine]{
 		EventMeta: simplevent.EventMeta{
@@ -237,7 +261,8 @@ func (c *MCClient) handleChatLine(line ChatLine) {
 			LogContext: func(ctx zerolog.Context) zerolog.Context {
 				return ctx.
 					Str("player", line.PlayerName).
-					Str("container", line.ContainerName)
+					Str("container", line.ContainerName).
+					Int("event_type", int(line.Event))
 			},
 			PortalKey:    makePortalKey(line.ContainerName),
 			Sender:       bridgev2.EventSender{Sender: networkid.UserID(line.PlayerName)},
@@ -248,12 +273,30 @@ func (c *MCClient) handleChatLine(line ChatLine) {
 		ID:   networkid.MessageID(fmt.Sprintf("mc-%s-%d", line.PlayerName, line.Timestamp.UnixNano())),
 		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal,
 			intent bridgev2.MatrixAPI, data ChatLine) (*bridgev2.ConvertedMessage, error) {
+			msgType := event.MsgText
+			body := data.Message
+
+			switch data.Event {
+			case EventJoin:
+				msgType = event.MsgNotice
+				body = "☑ " + data.PlayerName + " " + data.Message
+			case EventLeave:
+				msgType = event.MsgNotice
+				body = "☐ " + data.PlayerName + " " + data.Message
+			case EventDeath:
+				msgType = event.MsgNotice
+				body = "☠ " + data.PlayerName + " " + data.Message
+			case EventAdvancement:
+				msgType = event.MsgNotice
+				body = "🏆 " + data.PlayerName + " " + data.Message
+			}
+
 			return &bridgev2.ConvertedMessage{
 				Parts: []*bridgev2.ConvertedMessagePart{{
 					Type: event.EventMessage,
 					Content: &event.MessageEventContent{
-						MsgType: event.MsgText,
-						Body:    data.Message,
+						MsgType: msgType,
+						Body:    body,
 					},
 				}},
 			}, nil

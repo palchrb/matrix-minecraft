@@ -67,7 +67,12 @@ func (mc *MCConnector) Start(ctx context.Context) error {
 	}
 	mc.log.Info().Msg("Docker API tilkoblet")
 
-	mc.avatarFetcher = NewAvatarFetcher(mc.Config.AvatarAPIURL, mc.log)
+	avatarURL := mc.Config.AvatarAPIURL
+	if avatarURL == "" {
+		avatarURL = "https://mc-heads.net/avatar/%s/100"
+		mc.log.Info().Str("url", avatarURL).Msg("avatar_api_url ikke satt, bruker standard")
+	}
+	mc.avatarFetcher = NewAvatarFetcher(avatarURL, mc.log)
 	mc.provisioner = NewProvisioner(mc.docker, mc.br, &mc.Config, mc, mc.log)
 
 	// Ved restart: gjenopprett server-tilkoblinger hvis admin allerede er logget inn
@@ -125,7 +130,11 @@ func (mc *MCConnector) initServerClient(login *bridgev2.UserLogin) error {
 }
 
 func (mc *MCConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
-	return &bridgev2.NetworkGeneralCapabilities{}
+	return &bridgev2.NetworkGeneralCapabilities{
+		// Re-request brukerinfo på innkommende meldinger slik at avatar-henting
+		// forsøkes igjen hvis den feilet første gang.
+		AggressiveUpdateInfo: true,
+	}
 }
 
 func (mc *MCConnector) GetBridgeInfoVersion() (info, capabilities int) {
