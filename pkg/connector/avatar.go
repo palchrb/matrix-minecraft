@@ -62,14 +62,7 @@ func (f *AvatarFetcher) Fetch(ctx context.Context, username string,
 
 	result := &AvatarResult{
 		LastModified: lastModified,
-		AccountValid: true,
-	}
-
-	if resp.Header.Get("X-Account-Valid") == "false" {
-		f.log.Debug().Str("username", username).
-			Msg("MC-konto ikke gyldig, ingen avatar")
-		result.AccountValid = false
-		return result, nil
+		AccountValid: resp.Header.Get("X-Account-Valid") != "false",
 	}
 
 	if resp.StatusCode == http.StatusNotModified {
