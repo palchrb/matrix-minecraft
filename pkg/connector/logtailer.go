@@ -179,11 +179,18 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 		if cl != nil {
 			cl.Timestamp = time.Now()
 			cl.ContainerName = t.containerName
+			t.log.Trace().
+				Str("player", cl.PlayerName).
+				Int("event", int(cl.Event)).
+				Str("message", cl.Message).
+				Msg("Matchet logg-linje")
 			select {
 			case lineCh <- *cl:
 			case <-ctx.Done():
 				return nil
 			}
+		} else if len(line) > 0 {
+			t.log.Trace().Str("line", line).Msg("Umatchet logg-linje")
 		}
 	}
 

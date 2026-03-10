@@ -18,4 +18,9 @@ message_color: white
 provisioning_secret: ""
 
 # Avatar API URL (%s erstattes med MC-brukernavn)
-avatar_api_url: "https://mc-heads.net/avatar/%s/100"
+# Starlight Skins støtter både Java- og Bedrock/Floodgate-spillere
+avatar_api_url: "https://starlightskins.lunareclipse.studio/render/default/%s/bust"
+
+# MXC-URI for portal-avatar (rom-ikon). Last opp et bilde til Matrix
+# og sett MXC-URLen her. Brukes som ikon for Minecraft-rommet.
+portal_avatar_mxc: ""

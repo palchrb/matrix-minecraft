@@ -13,6 +13,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/simplevent"
 	"maunium.net/go/mautrix/bridgev2/status"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 )
 
 // MCClient implementerer bridgev2.NetworkAPI for en enkelt Minecraft-server.
@@ -102,7 +103,7 @@ func (c *MCClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*b
 	if name == "" {
 		name = c.Meta.ContainerName
 	}
-	return &bridgev2.ChatInfo{
+	info := &bridgev2.ChatInfo{
 		Name: &name,
 		Type: ptrTo(database.RoomTypeDefault),
 		Members: &bridgev2.ChatMemberList{
@@ -116,7 +117,14 @@ func (c *MCClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*b
 				PowerLevel: ptrInt(50),
 			}},
 		},
-	}, nil
+	}
+	if mxc := c.Connector.Config.PortalAvatarMXC; mxc != "" {
+		info.Avatar = &bridgev2.Avatar{
+			ID:  networkid.AvatarID("portal-avatar"),
+			MXC: id.ContentURIString(mxc),
+		}
+	}
+	return info, nil
 }
 
 func ptrInt(v int) *int {
@@ -130,27 +138,28 @@ func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bri
 		Name: &username,
 	}
 
-	// Hent avatar fra MC-heads API.
+	// Hent avatar fra Starlight Skins API.
 	// Siden AggressiveUpdateInfo er aktivert kalles denne på hver melding,
 	// så vi sjekker om ghosten allerede har avatar satt for å unngå
-	// unødvendige HTTP-kall (bare re-sjekk hvert 6. time).
+	// unødvendige HTTP-kall (bare re-sjekk hvert 1. time).
 	if c.AvatarFetch != nil {
-		var lastMod time.Time
+		var etag string
 		var skipFetch bool
 		if meta, ok := ghost.Metadata.(*GhostMetadata); ok {
-			lastMod = meta.AvatarLastModified
-			// Hvis avatar allerede er satt og ikke eldre enn 6 timer, ikke hent på nytt
-			if ghost.AvatarSet && !lastMod.IsZero() &&
-				time.Since(lastMod) < 6*time.Hour {
+			etag = meta.AvatarETag
+			// Hvis avatar allerede er satt og hentet for < 1 time siden, skip
+			if ghost.AvatarSet && etag != "" &&
+				!meta.AvatarFetchedAt.IsZero() &&
+				time.Since(meta.AvatarFetchedAt) < 1*time.Hour {
 				skipFetch = true
 			}
 		}
 		if !skipFetch {
 			c.log.Debug().Str("player", username).
-				Time("last_modified", lastMod).
+				Str("etag", etag).
 				Bool("avatar_set", ghost.AvatarSet).
 				Msg("Henter avatar")
-			result, err := c.AvatarFetch.Fetch(ctx, username, lastMod)
+			result, err := c.AvatarFetch.Fetch(ctx, username, etag)
 			if err != nil {
 				c.log.Warn().Err(err).Str("player", username).
 					Msg("Avatar-henting feilet")
@@ -159,8 +168,8 @@ func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bri
 					Int("bytes", len(result.Data)).
 					Msg("Ny avatar mottatt, laster opp")
 				info.Avatar = &bridgev2.Avatar{
-					ID: networkid.AvatarID(fmt.Sprintf("mc-avatar-%s-%d",
-						username, result.LastModified.Unix())),
+					ID: networkid.AvatarID(fmt.Sprintf("mc-avatar-%s-%s",
+						username, result.ETag)),
 					Get: func(ctx context.Context) ([]byte, error) {
 						return result.Data, nil
 					},
@@ -171,15 +180,24 @@ func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bri
 						if !ok {
 							return false
 						}
-						meta.AvatarLastModified = result.LastModified
-						meta.AvatarValid = result.AccountValid
+						meta.AvatarETag = result.ETag
+						meta.AvatarFetchedAt = time.Now()
 						return true
 					})
 			} else {
 				c.log.Debug().Str("player", username).
 					Bool("changed", result.Changed).
-					Bool("valid", result.AccountValid).
-					Msg("Avatar uendret eller ingen data")
+					Msg("Avatar uendret (304)")
+				// Oppdater FetchedAt selv ved 304 for å resette TTL
+				info.ExtraUpdates = bridgev2.MergeExtraUpdaters(info.ExtraUpdates,
+					func(ctx context.Context, ghost *bridgev2.Ghost) bool {
+						meta, ok := ghost.Metadata.(*GhostMetadata)
+						if !ok {
+							return false
+						}
+						meta.AvatarFetchedAt = time.Now()
+						return true
+					})
 			}
 		}
 	}
