@@ -101,8 +101,7 @@ func (c *MCClient) LogoutRemote(ctx context.Context) {
 }
 
 func (c *MCClient) IsThisUser(ctx context.Context, userID networkid.UserID) bool {
-	// Server-klienter eier ingen ghost-brukere direkte
-	return false
+	return string(userID) == string(c.UserLogin.UserMXID)
 }
 
 func (c *MCClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
