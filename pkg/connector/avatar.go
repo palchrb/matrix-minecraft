@@ -25,22 +25,21 @@ func NewAvatarFetcher(apiURLTemplate string, log zerolog.Logger) *AvatarFetcher 
 }
 
 type AvatarResult struct {
-	Changed      bool      // false betyr 304 Not Modified
-	Data         []byte    // PNG-data, kun satt hvis Changed=true
-	LastModified time.Time // oppdatert timestamp fra serveren
-	AccountValid bool      // false hvis ukjent MC-bruker
+	Changed bool   // false betyr 304 Not Modified
+	Data    []byte // bilde-data, kun satt hvis Changed=true
+	ETag    string // ETag fra serveren for conditional GET
 }
 
 // GhostMetadata lagres per ghost-bruker (MC-spiller) i databasen.
 type GhostMetadata struct {
-	AvatarLastModified time.Time `json:"avatar_last_modified,omitempty"`
-	AvatarMXC          string    `json:"avatar_mxc,omitempty"`
-	AvatarValid        bool      `json:"avatar_valid"`
+	AvatarETag      string    `json:"avatar_etag,omitempty"`
+	AvatarFetchedAt time.Time `json:"avatar_fetched_at,omitempty"`
 }
 
-// Fetch henter avatar med HTTP If-Modified-Since conditional GET.
+// Fetch henter avatar med ETag-basert conditional GET.
+// Sender If-None-Match hvis vi har en ETag fra forrige henting.
 func (f *AvatarFetcher) Fetch(ctx context.Context, username string,
-	lastModified time.Time) (*AvatarResult, error) {
+	etag string) (*AvatarResult, error) {
 
 	url := fmt.Sprintf(f.apiURLTemplate, username)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -48,9 +47,8 @@ func (f *AvatarFetcher) Fetch(ctx context.Context, username string,
 		return nil, err
 	}
 
-	if !lastModified.IsZero() {
-		req.Header.Set("If-Modified-Since",
-			lastModified.UTC().Format(http.TimeFormat))
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
 	}
 	req.Header.Set("User-Agent", "mautrix-minecraft/1.0")
 
@@ -61,8 +59,7 @@ func (f *AvatarFetcher) Fetch(ctx context.Context, username string,
 	defer resp.Body.Close()
 
 	result := &AvatarResult{
-		LastModified: lastModified,
-		AccountValid: resp.Header.Get("X-Account-Valid") != "false",
+		ETag: etag, // behold gammel ETag som fallback
 	}
 
 	if resp.StatusCode == http.StatusNotModified {
@@ -74,10 +71,9 @@ func (f *AvatarFetcher) Fetch(ctx context.Context, username string,
 		return nil, fmt.Errorf("avatar API svarte %d", resp.StatusCode)
 	}
 
-	if lm := resp.Header.Get("Last-Modified"); lm != "" {
-		if t, err := http.ParseTime(lm); err == nil {
-			result.LastModified = t
-		}
+	// Oppdater ETag fra respons
+	if newETag := resp.Header.Get("ETag"); newETag != "" {
+		result.ETag = newETag
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

@@ -28,6 +28,9 @@ type Config struct {
 
 	// Avatar API URL (%s erstattes med MC-brukernavn)
 	AvatarAPIURL string `yaml:"avatar_api_url"`
+
+	// MXC-URI for portal-avatar (rom-ikon). Sett til bot-avataren din.
+	PortalAvatarMXC string `yaml:"portal_avatar_mxc"`
 }
 
 func upgradeConfig(helper configupgrade.Helper) {
@@ -40,6 +43,7 @@ func upgradeConfig(helper configupgrade.Helper) {
 	helper.Copy(configupgrade.Str, "message_color")
 	helper.Copy(configupgrade.Str, "provisioning_secret")
 	helper.Copy(configupgrade.Str, "avatar_api_url")
+	helper.Copy(configupgrade.Str, "portal_avatar_mxc")
 }
 
 func (mc *MCConnector) GetConfig() (string, any, configupgrade.Upgrader) {
