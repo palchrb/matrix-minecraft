@@ -126,12 +126,25 @@ func (mc *MCConnector) restoreOnRestart(ctx context.Context) {
 	}
 }
 
-// updateSpaceAvatar oppdaterer space-avataren for en eksisterende login.
-// Spacet settes kun med avatar ved opprettelse, så denne metoden
-// sikrer at avataren oppdateres ved restart hvis den har endret seg.
+// updateSpaceAvatar oppdaterer space-avataren for en eksisterende login,
+// men bare hvis den faktisk har endret seg.
 func (mc *MCConnector) updateSpaceAvatar(ctx context.Context, login *bridgev2.UserLogin) {
 	if mc.networkIconMXC == "" || login.SpaceRoom == "" {
 		return
+	}
+	// Sjekk nåværende avatar først for å unngå unødvendige state events
+	if stateGetter, ok := mc.br.Matrix.(bridgev2.MatrixConnectorWithArbitraryRoomState); ok {
+		currentState, err := stateGetter.GetStateEvent(ctx, login.SpaceRoom, event.StateRoomAvatar, "")
+		if err == nil && currentState != nil {
+			if parseErr := currentState.Content.ParseRaw(event.StateRoomAvatar); parseErr == nil {
+				if currentState.Content.AsRoomAvatar().URL == mc.networkIconMXC {
+					mc.log.Debug().
+						Str("space_room", string(login.SpaceRoom)).
+						Msg("Space-avatar er allerede oppdatert, hopper over")
+					return
+				}
+			}
+		}
 	}
 	_, err := mc.br.Bot.SendState(ctx, login.SpaceRoom, event.StateRoomAvatar, "", &event.Content{
 		Parsed: &event.RoomAvatarEventContent{
