@@ -12,7 +12,9 @@ import (
 	"go.mau.fi/util/configupgrade"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
+	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/id"
 )
 
 // MCLoginMetadata er den eneste metadata-typen for alle UserLogin-rader.
@@ -31,12 +33,13 @@ type MCLoginMetadata struct {
 
 // MCConnector implementerer bridgev2.NetworkConnector.
 type MCConnector struct {
-	br            *bridgev2.Bridge
-	Config        Config
-	docker        *dockerclient.Client
-	provisioner   *Provisioner
-	avatarFetcher *AvatarFetcher
-	log           zerolog.Logger
+	br             *bridgev2.Bridge
+	Config         Config
+	docker         *dockerclient.Client
+	provisioner    *Provisioner
+	avatarFetcher  *AvatarFetcher
+	log            zerolog.Logger
+	networkIconMXC id.ContentURIString // Bot-avatar fra config, brukes som space-ikon
 }
 
 var _ bridgev2.NetworkConnector = (*MCConnector)(nil)
@@ -75,6 +78,14 @@ func (mc *MCConnector) Start(ctx context.Context) error {
 	}
 	mc.avatarFetcher = NewAvatarFetcher(avatarURL, mc.log)
 	mc.provisioner = NewProvisioner(mc.docker, mc.br, &mc.Config, mc, mc.log)
+
+	// Hent bot-avatar fra config for å bruke som space-ikon (NetworkIcon)
+	if mx, ok := mc.br.Matrix.(*matrix.Connector); ok {
+		if avatar := mx.Config.AppService.Bot.ParsedAvatar; !avatar.IsEmpty() {
+			mc.networkIconMXC = id.ContentURIString(avatar.String())
+			mc.log.Info().Str("mxc", string(mc.networkIconMXC)).Msg("Space-ikon satt fra bot-avatar")
+		}
+	}
 
 	// Ved restart: gjenopprett server-tilkoblinger hvis admin allerede er logget inn
 	go mc.restoreOnRestart(ctx)
@@ -146,6 +157,7 @@ func (mc *MCConnector) GetName() bridgev2.BridgeName {
 	return bridgev2.BridgeName{
 		DisplayName:      "Minecraft",
 		NetworkURL:       "https://minecraft.net",
+		NetworkIcon:      mc.networkIconMXC,
 		NetworkID:        "minecraft",
 		BeeperBridgeType: "github.com/palchrb/matrix-minecraft",
 		DefaultPort:      29333,

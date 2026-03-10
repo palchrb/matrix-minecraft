@@ -1,10 +1,8 @@
 package connector
 
 import (
-	"archive/tar"
 	"context"
 	"fmt"
-	"io"
 	"sync"
 	"time"
 
@@ -125,47 +123,14 @@ func (c *MCClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*b
 		},
 	}
 
-	// Portal-avatar: Docker-label MXC > server-icon.png fra container
+	// Portal-avatar fra Docker-label (mc-bridge.avatar)
 	if mxc := c.Meta.AvatarMXC; mxc != "" {
 		info.Avatar = &bridgev2.Avatar{
 			ID:  networkid.AvatarID("label-avatar-" + c.Meta.ContainerName),
 			MXC: id.ContentURIString(mxc),
 		}
-	} else if iconData := c.fetchServerIcon(ctx); iconData != nil {
-		info.Avatar = &bridgev2.Avatar{
-			ID: networkid.AvatarID("server-icon-" + c.Meta.ContainerName),
-			Get: func(ctx context.Context) ([]byte, error) {
-				return iconData, nil
-			},
-		}
 	}
 	return info, nil
-}
-
-// fetchServerIcon henter server-icon.png fra MC-containeren via Docker cp.
-func (c *MCClient) fetchServerIcon(ctx context.Context) []byte {
-	reader, _, err := c.Connector.docker.CopyFromContainer(
-		ctx, c.Meta.ContainerName, "/data/server-icon.png",
-	)
-	if err != nil {
-		c.log.Debug().Err(err).Msg("Kunne ikke hente server-icon.png fra container")
-		return nil
-	}
-	defer reader.Close()
-
-	// Docker CopyFromContainer returnerer en tar-strøm
-	tr := tar.NewReader(reader)
-	if _, err := tr.Next(); err != nil {
-		c.log.Debug().Err(err).Msg("Kunne ikke lese tar-header for server-icon")
-		return nil
-	}
-	data, err := io.ReadAll(io.LimitReader(tr, 1<<20))
-	if err != nil {
-		c.log.Debug().Err(err).Msg("Kunne ikke lese server-icon data")
-		return nil
-	}
-	c.log.Debug().Int("bytes", len(data)).Msg("Hentet server-icon.png fra container")
-	return data
 }
 
 func ptrInt(v int) *int {
