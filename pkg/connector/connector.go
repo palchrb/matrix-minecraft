@@ -14,6 +14,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
 
@@ -119,7 +120,33 @@ func (mc *MCConnector) restoreOnRestart(ctx context.Context) {
 				}
 				go mc.provisioner.WatchEvents(ctx, login)
 			}
+			// Oppdater space-avatar hvis den er satt og spacet eksisterer
+			mc.updateSpaceAvatar(ctx, login)
 		}
+	}
+}
+
+// updateSpaceAvatar oppdaterer space-avataren for en eksisterende login.
+// Spacet settes kun med avatar ved opprettelse, så denne metoden
+// sikrer at avataren oppdateres ved restart hvis den har endret seg.
+func (mc *MCConnector) updateSpaceAvatar(ctx context.Context, login *bridgev2.UserLogin) {
+	if mc.networkIconMXC == "" || login.SpaceRoom == "" {
+		return
+	}
+	_, err := mc.br.Bot.SendState(ctx, login.SpaceRoom, event.StateRoomAvatar, "", &event.Content{
+		Parsed: &event.RoomAvatarEventContent{
+			URL: mc.networkIconMXC,
+		},
+	}, time.Time{})
+	if err != nil {
+		mc.log.Warn().Err(err).
+			Str("space_room", string(login.SpaceRoom)).
+			Msg("Kunne ikke oppdatere space-avatar")
+	} else {
+		mc.log.Info().
+			Str("space_room", string(login.SpaceRoom)).
+			Str("mxc", string(mc.networkIconMXC)).
+			Msg("Space-avatar oppdatert")
 	}
 }
 

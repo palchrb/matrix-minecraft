@@ -42,6 +42,7 @@ func (f *AvatarFetcher) Fetch(ctx context.Context, username string,
 	etag string) (*AvatarResult, error) {
 
 	url := fmt.Sprintf(f.apiURLTemplate, username)
+	f.log.Debug().Str("url", url).Str("username", username).Msg("Henter avatar")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -68,7 +69,7 @@ func (f *AvatarFetcher) Fetch(ctx context.Context, username string,
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("avatar API svarte %d", resp.StatusCode)
+		return nil, fmt.Errorf("avatar API svarte %d for %s", resp.StatusCode, url)
 	}
 
 	// Oppdater ETag fra respons

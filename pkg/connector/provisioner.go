@@ -143,6 +143,16 @@ func (p *Provisioner) provisionServer(ctx context.Context,
 					p.log.Warn().Err(err).Str("container", meta.ContainerName).
 						Msg("Kunne ikke lagre oppdatert metadata")
 				}
+				// Oppdater portalen slik at endret avatar/navn reflekteres i Matrix-rommet
+				if client, ok := existing.Client.(*MCClient); ok {
+					portalKey := makePortalKey(meta.ContainerName)
+					if portal, err := p.bridge.GetPortalByKey(ctx, portalKey); err == nil && portal.MXID != "" {
+						chatInfo, _ := client.GetChatInfo(ctx, portal)
+						portal.UpdateInfo(ctx, chatInfo, existing, nil, time.Time{})
+						p.log.Debug().Str("container", meta.ContainerName).
+							Msg("Portal-info oppdatert etter metadata-endring")
+					}
+				}
 			}
 		}
 		return nil
