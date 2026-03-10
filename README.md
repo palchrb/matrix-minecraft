@@ -1,4 +1,5 @@
 # matrix-minecraft
+Made a stupid and overengineered bridge between minecraft and matrix... Unelegantly based on tailing the log of an itzg docker run mc server, and sending replies via rcon. Would probably have been smarter just to use one of the existing bridges in the form of paper plugins, but i just wanted to have e2ee so then i made this one insted. Stupid and pointless? Yes..If you want to talk about it, feel free to reach out at [#whatever:vibb.me](https://matrix.to/#/%23whatever:vibb.me)
 
 A Matrix-Minecraft bridge built on [mautrix-go](https://github.com/mautrix/go) bridgev2. It automatically discovers Minecraft server containers via Docker labels, bridges chat messages bidirectionally, and shows in-game events (joins, deaths, advancements) in your Matrix room.
 
