@@ -138,6 +138,11 @@ func ptrInt(v int) *int {
 }
 
 func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
+	// Bridge-brukeren selv er ikke en MC-spiller, ikke sett ghost-info
+	if c.IsThisUser(ctx, ghost.ID) {
+		return nil, nil
+	}
+
 	username := string(ghost.ID)
 
 	info := &bridgev2.UserInfo{
@@ -145,11 +150,10 @@ func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bri
 	}
 
 	// Hent avatar fra Starlight Skins API.
-	// Hopp over for bridge-brukeren selv (Matrix-ID, ikke MC-spiller).
 	// Siden AggressiveUpdateInfo er aktivert kalles denne på hver melding,
 	// så vi sjekker om ghosten allerede har avatar satt for å unngå
 	// unødvendige HTTP-kall (bare re-sjekk hvert 1. time).
-	if c.AvatarFetch != nil && !c.IsThisUser(ctx, ghost.ID) {
+	if c.AvatarFetch != nil {
 		var etag string
 		var skipFetch bool
 		if meta, ok := ghost.Metadata.(*GhostMetadata); ok {
