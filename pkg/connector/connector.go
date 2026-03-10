@@ -13,7 +13,6 @@ import (
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
-	"maunium.net/go/mautrix/id"
 )
 
 // MCLoginMetadata er den eneste metadata-typen for alle UserLogin-rader.
@@ -27,6 +26,7 @@ type MCLoginMetadata struct {
 	RCONHost      string    `json:"rcon_host,omitempty"`
 	RCONPort      int       `json:"rcon_port,omitempty"`
 	RCONPassword  string    `json:"rcon_password,omitempty"`
+	AvatarMXC     string    `json:"avatar_mxc,omitempty"` // Fra mc-bridge.avatar Docker-label
 }
 
 // MCConnector implementerer bridgev2.NetworkConnector.
@@ -143,18 +143,13 @@ func (mc *MCConnector) GetBridgeInfoVersion() (info, capabilities int) {
 }
 
 func (mc *MCConnector) GetName() bridgev2.BridgeName {
-	bn := bridgev2.BridgeName{
+	return bridgev2.BridgeName{
 		DisplayName:      "Minecraft",
 		NetworkURL:       "https://minecraft.net",
 		NetworkID:        "minecraft",
 		BeeperBridgeType: "github.com/palchrb/matrix-minecraft",
 		DefaultPort:      29333,
 	}
-	// NetworkIcon settes fra config (kan være tom ved første kall før config er lastet)
-	if mc.Config.NetworkIconMXC != "" {
-		bn.NetworkIcon = id.ContentURIString(mc.Config.NetworkIconMXC)
-	}
-	return bn
 }
 
 func (mc *MCConnector) GetDBMetaTypes() database.MetaTypes {
