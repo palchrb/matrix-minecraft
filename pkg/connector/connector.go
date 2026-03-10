@@ -26,6 +26,7 @@ type MCLoginMetadata struct {
 	RCONHost      string    `json:"rcon_host,omitempty"`
 	RCONPort      int       `json:"rcon_port,omitempty"`
 	RCONPassword  string    `json:"rcon_password,omitempty"`
+	AvatarMXC     string    `json:"avatar_mxc,omitempty"` // Fra mc-bridge.avatar Docker-label
 }
 
 // MCConnector implementerer bridgev2.NetworkConnector.

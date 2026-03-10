@@ -77,6 +77,11 @@ func (p *Provisioner) SyncAll(ctx context.Context, adminLogin *bridgev2.UserLogi
 			displayName = dn
 		}
 
+		avatarMXC := ""
+		if mxc, ok := c.Labels[p.labelPrefix+".avatar"]; ok && mxc != "" {
+			avatarMXC = mxc
+		}
+
 		info, err := p.docker.ContainerInspect(ctx, c.ID)
 		if err != nil {
 			p.log.Warn().Err(err).Str("container", name).
@@ -101,9 +106,10 @@ func (p *Provisioner) SyncAll(ctx context.Context, adminLogin *bridgev2.UserLogi
 			ContainerID:   c.ID,
 			ContainerName: name,
 			DisplayName:   displayName,
-			RCONHost:      name, // container-navn = hostname i Docker-nettverk
+			RCONHost:      name, // container-namn = hostname i Docker-nettverk
 			RCONPort:      rconPort,
 			RCONPassword:  rconPassword,
+			AvatarMXC:     avatarMXC,
 		}); err != nil {
 			p.log.Error().Err(err).Str("container", name).
 				Msg("Provisjonering feilet")

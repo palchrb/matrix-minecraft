@@ -64,12 +64,17 @@ func (c *MCClient) Connect(ctx context.Context) {
 	portal, err := c.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
 	if err != nil {
 		c.log.Warn().Err(err).Msg("Kunne ikke hente portal")
-	} else if portal.MXID == "" {
+	} else {
 		chatInfo, _ := c.GetChatInfo(ctx, portal)
-		if createErr := portal.CreateMatrixRoom(ctx, c.UserLogin, chatInfo); createErr != nil {
-			c.log.Warn().Err(createErr).Msg("Kunne ikke opprette Matrix-rom")
+		if portal.MXID == "" {
+			if createErr := portal.CreateMatrixRoom(ctx, c.UserLogin, chatInfo); createErr != nil {
+				c.log.Warn().Err(createErr).Msg("Kunne ikke opprette Matrix-rom")
+			} else {
+				c.log.Info().Str("room", string(portal.MXID)).Msg("Matrix-rom opprettet for server")
+			}
 		} else {
-			c.log.Info().Str("room", string(portal.MXID)).Msg("Matrix-rom opprettet for server")
+			// Oppdater rom-info (avatar, navn etc.) ved reconnect
+			portal.UpdateInfo(ctx, chatInfo, c.UserLogin, nil, time.Time{})
 		}
 	}
 
@@ -121,19 +126,18 @@ func (c *MCClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*b
 		},
 	}
 
-	// Prøv å hente server-icon.png fra MC-containeren som portal-avatar.
-	// Fallback til portal_avatar_mxc fra config.
-	if iconData := c.fetchServerIcon(ctx); iconData != nil {
+	// Portal-avatar: Docker-label MXC > server-icon.png fra container
+	if mxc := c.Meta.AvatarMXC; mxc != "" {
+		info.Avatar = &bridgev2.Avatar{
+			ID:  networkid.AvatarID("label-avatar-" + c.Meta.ContainerName),
+			MXC: id.ContentURIString(mxc),
+		}
+	} else if iconData := c.fetchServerIcon(ctx); iconData != nil {
 		info.Avatar = &bridgev2.Avatar{
 			ID: networkid.AvatarID("server-icon-" + c.Meta.ContainerName),
 			Get: func(ctx context.Context) ([]byte, error) {
 				return iconData, nil
 			},
-		}
-	} else if mxc := c.Connector.Config.PortalAvatarMXC; mxc != "" {
-		info.Avatar = &bridgev2.Avatar{
-			ID:  networkid.AvatarID("portal-avatar"),
-			MXC: id.ContentURIString(mxc),
 		}
 	}
 	return info, nil
@@ -305,6 +309,15 @@ func (c *MCClient) receiveLoop(ctx context.Context) {
 }
 
 func (c *MCClient) handleChatLine(line ChatLine) {
+	// Filtrer bort non-chat events hvis bridge_all_events er false
+	if !c.Connector.Config.BridgeAllEvents && line.Event != EventChat {
+		c.log.Debug().
+			Str("player", line.PlayerName).
+			Int("event", int(line.Event)).
+			Msg("Dropper non-chat event (bridge_all_events=false)")
+		return
+	}
+
 	c.log.Debug().
 		Str("player", line.PlayerName).
 		Str("message", line.Message).

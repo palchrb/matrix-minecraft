@@ -21,6 +21,25 @@ provisioning_secret: ""
 # Starlight Skins støtter både Java- og Bedrock/Floodgate-spillere
 avatar_api_url: "https://starlightskins.lunareclipse.studio/render/default/%s/bust"
 
-# MXC-URI for portal-avatar (rom-ikon). Last opp et bilde til Matrix
-# og sett MXC-URLen her. Brukes som ikon for Minecraft-rommet.
-portal_avatar_mxc: ""
+# Bridge alle hendelser (join/leave/death/advancement) i tillegg til chat.
+# Sett til false for å kun bridge chat-meldinger.
+bridge_all_events: true
+
+# ─── Anbefalte innstillinger i bridge-seksjonen av config.yaml ───
+#
+# Bridgen legger allerede til avsendernavn i tellraw-kommandoen,
+# så relay message_formats bør IKKE inkludere avsendernavn (unngå dobbelt visning).
+# Endre under bridge.relay.message_formats:
+#
+#   message_formats:
+#       m.text: "{{ .Message }}"
+#       m.notice: "{{ .Message }}"
+#       m.emote: "* {{ .Message }}"
+#       m.file: "sent a file"
+#       m.image: "sent an image"
+#       m.audio: "sent audio"
+#       m.video: "sent a video"
+#       m.location: "sent a location"
+#
+# For å bridge meldinger fra bots (m.notice), sett:
+#   bridge_notices: true
