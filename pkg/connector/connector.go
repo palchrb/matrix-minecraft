@@ -69,7 +69,7 @@ func (mc *MCConnector) Start(ctx context.Context) error {
 
 	avatarURL := mc.Config.AvatarAPIURL
 	if avatarURL == "" {
-		avatarURL = "https://mc-heads.net/avatar/%s/100"
+		avatarURL = "https://starlightskins.lunareclipse.studio/render/default/%s/bust"
 		mc.log.Info().Str("url", avatarURL).Msg("avatar_api_url ikke satt, bruker standard")
 	}
 	mc.avatarFetcher = NewAvatarFetcher(avatarURL, mc.log)
