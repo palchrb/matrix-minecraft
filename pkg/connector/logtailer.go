@@ -14,6 +14,11 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// ansiRegex stripper ANSI escape-koder (fargekoder etc.) fra logg-linjer.
+// Minecraft-servere i TTY-modus sender ofte fargekoder som gjør at regex
+// ikke matcher selv om teksten ser riktig ut.
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07`)
+
 // chatRegex matches Minecraft server chat lines in various log formats:
 //   - Vanilla:    [HH:MM:SS] [Server thread/INFO]: <PlayerName> message
 //   - Paper/etc:  [HH:MM:SS INFO]: <PlayerName> message
@@ -143,7 +148,8 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 
 	scanner := bufio.NewScanner(logReader)
 	for scanner.Scan() {
-		line := scanner.Text()
+		// Strip ANSI-fargekoder før matching
+		line := ansiRegex.ReplaceAllString(scanner.Text(), "")
 		var cl *ChatLine
 
 		if m := chatRegex.FindStringSubmatch(line); m != nil {
