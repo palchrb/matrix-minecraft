@@ -152,16 +152,6 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 				Message:    m[2],
 				Event:      EventChat,
 			}
-		} else if m := joinLeaveRegex.FindStringSubmatch(line); m != nil {
-			evt := EventJoin
-			if m[2] == "left the game" {
-				evt = EventLeave
-			}
-			cl = &ChatLine{
-				PlayerName: m[1],
-				Message:    m[2],
-				Event:      evt,
-			}
 		} else if m := deathRegex.FindStringSubmatch(line); m != nil {
 			cl = &ChatLine{
 				PlayerName: m[1],

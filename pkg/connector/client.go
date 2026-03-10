@@ -55,9 +55,12 @@ func (c *MCClient) Connect(ctx context.Context) {
 		return
 	}
 
-	// Start log-tailing i bakgrunnen
+	// Start log-tailing for chat/death/advancement i bakgrunnen
 	go c.LogTailer.Start(tailCtx, c.lineCh)
 	go c.receiveLoop(tailCtx)
+
+	// Start RCON-basert spiller-overvåking for join/leave
+	go c.watchPlayers(tailCtx)
 
 	// Ensure the portal (Matrix room) exists for this server
 	portalKey := makePortalKey(c.Meta.ContainerName)
@@ -358,6 +361,76 @@ func (c *MCClient) handleChatLine(line ChatLine) {
 			}, nil
 		},
 	})
+}
+
+// watchPlayers poller RCON "list" og sender join/leave-events
+// ved å sammenligne med forrige spiller-liste.
+func (c *MCClient) watchPlayers(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	known := make(map[string]bool)
+	firstRun := true
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			players, err := c.RCON.List()
+			if err != nil {
+				c.log.Warn().Err(err).Msg("RCON list feilet")
+				// Prøv å koble til RCON på nytt
+				if reconnErr := c.RCON.Connect(ctx); reconnErr != nil {
+					c.log.Warn().Err(reconnErr).Msg("RCON reconnect feilet")
+				}
+				continue
+			}
+
+			current := make(map[string]bool, len(players))
+			for _, p := range players {
+				current[p] = true
+			}
+
+			if firstRun {
+				// Første gang: bare lagre listen, ikke send events
+				known = current
+				firstRun = false
+				c.log.Debug().Int("players", len(known)).Msg("Initiell spiller-liste hentet")
+				continue
+			}
+
+			// Finn nye spillere (joined)
+			for p := range current {
+				if !known[p] {
+					c.log.Debug().Str("player", p).Msg("Spiller koblet til (RCON)")
+					c.handleChatLine(ChatLine{
+						PlayerName:    p,
+						Message:       "joined the game",
+						Timestamp:     time.Now(),
+						ContainerName: c.Meta.ContainerName,
+						Event:         EventJoin,
+					})
+				}
+			}
+
+			// Finn spillere som har forlatt (left)
+			for p := range known {
+				if !current[p] {
+					c.log.Debug().Str("player", p).Msg("Spiller koblet fra (RCON)")
+					c.handleChatLine(ChatLine{
+						PlayerName:    p,
+						Message:       "left the game",
+						Timestamp:     time.Now(),
+						ContainerName: c.Meta.ContainerName,
+						Event:         EventLeave,
+					})
+				}
+			}
+
+			known = current
+		}
+	}
 }
 
 func ptrTo[T any](v T) *T {

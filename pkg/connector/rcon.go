@@ -104,6 +104,65 @@ type tellrawPart struct {
 	Bold  bool   `json:"bold,omitempty"`
 }
 
+// List returnerer en liste over online spillere via RCON "list"-kommandoen.
+// Formatet er typisk: "There are X of a max of Y players online: player1, player2"
+func (r *RCONClient) List() ([]string, error) {
+	resp, err := r.execute("list")
+	if err != nil {
+		return nil, err
+	}
+	return parseListResponse(resp), nil
+}
+
+// parseListResponse parser svaret fra "list"-kommandoen.
+// Formater: "There are X of a max of Y players online: p1, p2" eller bare "...online:"
+func parseListResponse(resp string) []string {
+	// Finn etter ":"
+	idx := -1
+	for i, c := range resp {
+		if c == ':' {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 || idx+2 > len(resp) {
+		return nil
+	}
+	playersStr := resp[idx+2:] // skip ": "
+	if playersStr == "" {
+		return nil
+	}
+	var players []string
+	for _, p := range splitAndTrim(playersStr) {
+		if p != "" {
+			players = append(players, p)
+		}
+	}
+	return players
+}
+
+func splitAndTrim(s string) []string {
+	var result []string
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || s[i] == ',' {
+			p := s[start:i]
+			// Trim spaces
+			for len(p) > 0 && p[0] == ' ' {
+				p = p[1:]
+			}
+			for len(p) > 0 && p[len(p)-1] == ' ' {
+				p = p[:len(p)-1]
+			}
+			if p != "" {
+				result = append(result, p)
+			}
+			start = i + 1
+		}
+	}
+	return result
+}
+
 // SendMessage sender chat-melding fra Matrix til Minecraft via tellraw.
 // Bruker json.Marshal for korrekt escaping av spesialtegn i meldingstekst.
 func (r *RCONClient) SendMessage(ctx context.Context, senderName, message string) error {
