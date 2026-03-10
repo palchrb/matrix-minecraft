@@ -123,10 +123,28 @@ func (p *Provisioner) provisionServer(ctx context.Context,
 
 	loginID := networkid.UserLoginID("server:" + meta.ContainerName)
 
-	// Allerede provisjonert?
+	// Allerede provisjonert? Oppdater metadata (avatar/navn kan ha endret seg)
 	if existing := p.bridge.GetCachedUserLoginByID(loginID); existing != nil {
 		p.log.Debug().Str("container", meta.ContainerName).
-			Msg("Allerede provisjonert")
+			Msg("Allerede provisjonert, oppdaterer metadata")
+		if existingMeta, ok := existing.Metadata.(*MCLoginMetadata); ok {
+			changed := false
+			if existingMeta.AvatarMXC != meta.AvatarMXC {
+				existingMeta.AvatarMXC = meta.AvatarMXC
+				changed = true
+			}
+			if existingMeta.DisplayName != meta.DisplayName {
+				existingMeta.DisplayName = meta.DisplayName
+				existing.RemoteName = meta.DisplayName
+				changed = true
+			}
+			if changed {
+				if err := existing.Save(ctx); err != nil {
+					p.log.Warn().Err(err).Str("container", meta.ContainerName).
+						Msg("Kunne ikke lagre oppdatert metadata")
+				}
+			}
+		}
 		return nil
 	}
 
