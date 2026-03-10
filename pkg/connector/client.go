@@ -64,12 +64,17 @@ func (c *MCClient) Connect(ctx context.Context) {
 	portal, err := c.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
 	if err != nil {
 		c.log.Warn().Err(err).Msg("Kunne ikke hente portal")
-	} else if portal.MXID == "" {
+	} else {
 		chatInfo, _ := c.GetChatInfo(ctx, portal)
-		if createErr := portal.CreateMatrixRoom(ctx, c.UserLogin, chatInfo); createErr != nil {
-			c.log.Warn().Err(createErr).Msg("Kunne ikke opprette Matrix-rom")
+		if portal.MXID == "" {
+			if createErr := portal.CreateMatrixRoom(ctx, c.UserLogin, chatInfo); createErr != nil {
+				c.log.Warn().Err(createErr).Msg("Kunne ikke opprette Matrix-rom")
+			} else {
+				c.log.Info().Str("room", string(portal.MXID)).Msg("Matrix-rom opprettet for server")
+			}
 		} else {
-			c.log.Info().Str("room", string(portal.MXID)).Msg("Matrix-rom opprettet for server")
+			// Oppdater rom-info (avatar, navn etc.) ved reconnect
+			portal.UpdateInfo(ctx, chatInfo, c.UserLogin, nil, time.Time{})
 		}
 	}
 

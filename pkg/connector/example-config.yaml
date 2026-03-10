@@ -24,3 +24,7 @@ avatar_api_url: "https://starlightskins.lunareclipse.studio/render/default/%s/bu
 # MXC-URI for portal-avatar (rom-ikon). Last opp et bilde til Matrix
 # og sett MXC-URLen her. Brukes som ikon for Minecraft-rommet.
 portal_avatar_mxc: ""
+
+# MXC-URI for nettverksikon (space-ikon). Brukes som ikon for
+# Minecraft-spacet i Matrix. Kan f.eks. være bot-avataren.
+network_icon_mxc: ""
