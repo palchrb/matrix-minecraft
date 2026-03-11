@@ -123,7 +123,7 @@ func (p *Provisioner) provisionServer(ctx context.Context,
 
 	loginID := networkid.UserLoginID("server:" + meta.ContainerName)
 
-	// Already provisioned? Update metadata (avatar/name may have changed)
+	// Already provisioned? Update metadata and reconnect if needed
 	if existing := p.bridge.GetCachedUserLoginByID(loginID); existing != nil {
 		p.log.Debug().Str("container", meta.ContainerName).
 			Msg("Already provisioned, updating metadata")
@@ -154,6 +154,12 @@ func (p *Provisioner) provisionServer(ctx context.Context,
 					}
 				}
 			}
+		}
+		// Reconnect if RCON is disconnected (e.g. after container restart)
+		if client, ok := existing.Client.(*MCClient); ok && !client.RCON.IsConnected() {
+			p.log.Info().Str("container", meta.ContainerName).
+				Msg("RCON disconnected, reconnecting")
+			existing.Client.Connect(ctx)
 		}
 		return nil
 	}
