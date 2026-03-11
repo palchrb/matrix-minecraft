@@ -53,9 +53,9 @@ func cleanName(name string) string {
 	return strings.TrimPrefix(name, "/")
 }
 
-// SyncAll scanner Docker for merkede containere og provisjonerer dem.
+// SyncAll scans Docker for labeled containers and provisions them.
 func (p *Provisioner) SyncAll(ctx context.Context, adminLogin *bridgev2.UserLogin) error {
-	p.log.Info().Msg("Scanner Docker etter MC-containere")
+	p.log.Info().Msg("Scanning Docker for MC containers")
 
 	containers, err := p.docker.ContainerList(ctx, container.ListOptions{
 		Filters: filters.NewArgs(
@@ -64,10 +64,10 @@ func (p *Provisioner) SyncAll(ctx context.Context, adminLogin *bridgev2.UserLogi
 		),
 	})
 	if err != nil {
-		return fmt.Errorf("ContainerList feilet: %w", err)
+		return fmt.Errorf("ContainerList failed: %w", err)
 	}
 
-	p.log.Info().Int("count", len(containers)).Msg("Fant merkede containere")
+	p.log.Info().Int("count", len(containers)).Msg("Found labeled containers")
 
 	for _, c := range containers {
 		name := cleanName(c.Names[0])
@@ -85,14 +85,14 @@ func (p *Provisioner) SyncAll(ctx context.Context, adminLogin *bridgev2.UserLogi
 		info, err := p.docker.ContainerInspect(ctx, c.ID)
 		if err != nil {
 			p.log.Warn().Err(err).Str("container", name).
-				Msg("ContainerInspect feilet, hopper over")
+				Msg("ContainerInspect failed, skipping")
 			continue
 		}
 
 		rconPassword := extractEnv(info.Config.Env, "RCON_PASSWORD")
 		if rconPassword == "" {
 			p.log.Warn().Str("container", name).
-				Msg("Ingen RCON_PASSWORD i container-env, hopper over")
+				Msg("No RCON_PASSWORD in container env, skipping")
 			continue
 		}
 
@@ -106,13 +106,13 @@ func (p *Provisioner) SyncAll(ctx context.Context, adminLogin *bridgev2.UserLogi
 			ContainerID:   c.ID,
 			ContainerName: name,
 			DisplayName:   displayName,
-			RCONHost:      name, // container-namn = hostname i Docker-nettverk
+			RCONHost:      name, // container name = hostname in Docker network
 			RCONPort:      rconPort,
 			RCONPassword:  rconPassword,
 			AvatarMXC:     avatarMXC,
 		}); err != nil {
 			p.log.Error().Err(err).Str("container", name).
-				Msg("Provisjonering feilet")
+				Msg("Provisioning failed")
 		}
 	}
 	return nil
@@ -123,10 +123,10 @@ func (p *Provisioner) provisionServer(ctx context.Context,
 
 	loginID := networkid.UserLoginID("server:" + meta.ContainerName)
 
-	// Allerede provisjonert? Oppdater metadata (avatar/navn kan ha endret seg)
+	// Already provisioned? Update metadata (avatar/name may have changed)
 	if existing := p.bridge.GetCachedUserLoginByID(loginID); existing != nil {
 		p.log.Debug().Str("container", meta.ContainerName).
-			Msg("Allerede provisjonert, oppdaterer metadata")
+			Msg("Already provisioned, updating metadata")
 		if existingMeta, ok := existing.Metadata.(*MCLoginMetadata); ok {
 			changed := false
 			if existingMeta.AvatarMXC != meta.AvatarMXC {
@@ -141,16 +141,16 @@ func (p *Provisioner) provisionServer(ctx context.Context,
 			if changed {
 				if err := existing.Save(ctx); err != nil {
 					p.log.Warn().Err(err).Str("container", meta.ContainerName).
-						Msg("Kunne ikke lagre oppdatert metadata")
+						Msg("Failed to save updated metadata")
 				}
-				// Oppdater portalen slik at endret avatar/navn reflekteres i Matrix-rommet
+				// Update the portal so changed avatar/name is reflected in the Matrix room
 				if client, ok := existing.Client.(*MCClient); ok {
 					portalKey := makePortalKey(meta.ContainerName)
 					if portal, err := p.bridge.GetPortalByKey(ctx, portalKey); err == nil && portal.MXID != "" {
 						chatInfo, _ := client.GetChatInfo(ctx, portal)
 						portal.UpdateInfo(ctx, chatInfo, existing, nil, time.Time{})
 						p.log.Debug().Str("container", meta.ContainerName).
-							Msg("Portal-info oppdatert etter metadata-endring")
+							Msg("Portal info updated after metadata change")
 					}
 				}
 			}
@@ -160,7 +160,7 @@ func (p *Provisioner) provisionServer(ctx context.Context,
 
 	p.log.Info().Str("container", meta.ContainerName).
 		Str("display_name", meta.DisplayName).
-		Msg("Provisjonerer server")
+		Msg("Provisioning server")
 
 	ul, err := adminLogin.User.NewLogin(ctx, &database.UserLogin{
 		ID:         loginID,
@@ -172,17 +172,17 @@ func (p *Provisioner) provisionServer(ctx context.Context,
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("NewLogin feilet: %w", err)
+		return fmt.Errorf("NewLogin failed: %w", err)
 	}
 
 	ul.Client.Connect(ctx)
 	return nil
 }
 
-// WatchEvents lytter på Docker-events for container start/stop.
-// Blokkerer – kall alltid i goroutine.
+// WatchEvents listens for Docker events for container start/stop.
+// Blocks — always call in a goroutine.
 func (p *Provisioner) WatchEvents(ctx context.Context, adminLogin *bridgev2.UserLogin) {
-	p.log.Info().Msg("Starter Docker event-watcher")
+	p.log.Info().Msg("Starting Docker event watcher")
 	backoff := 5 * time.Second
 	for {
 		if err := p.watchOnce(ctx, adminLogin); err != nil {
@@ -190,7 +190,7 @@ func (p *Provisioner) WatchEvents(ctx context.Context, adminLogin *bridgev2.User
 				return
 			}
 			p.log.Warn().Err(err).Dur("retry_in", backoff).
-				Msg("Event-stream feilet, prøver igjen")
+				Msg("Event stream failed, retrying")
 		}
 		select {
 		case <-ctx.Done():
@@ -233,21 +233,21 @@ func (p *Provisioner) handleDockerEvent(ctx context.Context,
 
 	switch ev.Action {
 	case "start":
-		p.log.Info().Str("container", name).Msg("Container startet")
-		// Vent litt så RCON rekker å starte
+		p.log.Info().Str("container", name).Msg("Container started")
+		// Wait briefly for RCON to start
 		time.Sleep(5 * time.Second)
 		if err := p.SyncAll(ctx, adminLogin); err != nil {
-			p.log.Error().Err(err).Msg("SyncAll feilet etter container start")
+			p.log.Error().Err(err).Msg("SyncAll failed after container start")
 		}
 
 	case "stop", "die":
-		p.log.Info().Str("container", name).Msg("Container stoppet")
+		p.log.Info().Str("container", name).Msg("Container stopped")
 		if login := p.bridge.GetCachedUserLoginByID(loginID); login != nil {
 			login.Client.Disconnect()
 			login.BridgeState.Send(status.BridgeState{
 				StateEvent: status.StateTransientDisconnect,
 				Error:      "container-stopped",
-				Message:    fmt.Sprintf("Container %s er ikke tilgjengelig", name),
+				Message:    fmt.Sprintf("Container %s is not available", name),
 			})
 		}
 	}

@@ -16,8 +16,8 @@ import (
 	"maunium.net/go/mautrix/id"
 )
 
-// MCClient implementerer bridgev2.NetworkAPI for en enkelt Minecraft-server.
-// Hver server-login har sin egen MCClient.
+// MCClient implements bridgev2.NetworkAPI for a single Minecraft server.
+// Each server login has its own MCClient.
 type MCClient struct {
 	UserLogin   *bridgev2.UserLogin
 	Connector   *MCConnector
@@ -42,18 +42,18 @@ func (c *MCClient) Connect(ctx context.Context) {
 	tailCtx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
 
-	// Koble til RCON
+	// Connect to RCON
 	if err := c.RCON.Connect(ctx); err != nil {
-		c.log.Error().Err(err).Msg("RCON-tilkobling feilet")
+		c.log.Error().Err(err).Msg("RCON connection failed")
 		c.UserLogin.BridgeState.Send(status.BridgeState{
 			StateEvent: status.StateTransientDisconnect,
 			Error:      "rcon-connect-failed",
-			Message:    fmt.Sprintf("Kunne ikke koble til RCON: %v", err),
+			Message:    fmt.Sprintf("Failed to connect to RCON: %v", err),
 		})
 		return
 	}
 
-	// Start log-tailing for alle events (chat/join/leave/death/advancement)
+	// Start log tailing for all events (chat/join/leave/death/advancement)
 	go c.LogTailer.Start(tailCtx, c.lineCh)
 	go c.receiveLoop(tailCtx)
 
@@ -61,17 +61,17 @@ func (c *MCClient) Connect(ctx context.Context) {
 	portalKey := makePortalKey(c.Meta.ContainerName)
 	portal, err := c.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
 	if err != nil {
-		c.log.Warn().Err(err).Msg("Kunne ikke hente portal")
+		c.log.Warn().Err(err).Msg("Failed to get portal")
 	} else {
 		chatInfo, _ := c.GetChatInfo(ctx, portal)
 		if portal.MXID == "" {
 			if createErr := portal.CreateMatrixRoom(ctx, c.UserLogin, chatInfo); createErr != nil {
-				c.log.Warn().Err(createErr).Msg("Kunne ikke opprette Matrix-rom")
+				c.log.Warn().Err(createErr).Msg("Failed to create Matrix room")
 			} else {
-				c.log.Info().Str("room", string(portal.MXID)).Msg("Matrix-rom opprettet for server")
+				c.log.Info().Str("room", string(portal.MXID)).Msg("Matrix room created for server")
 			}
 		} else {
-			// Oppdater rom-info (avatar, navn etc.) ved reconnect
+			// Update room info (avatar, name, etc.) on reconnect
 			portal.UpdateInfo(ctx, chatInfo, c.UserLogin, nil, time.Time{})
 		}
 	}
@@ -79,11 +79,11 @@ func (c *MCClient) Connect(ctx context.Context) {
 	c.UserLogin.BridgeState.Send(status.BridgeState{
 		StateEvent: status.StateConnected,
 	})
-	c.log.Info().Msg("Server-klient tilkoblet")
+	c.log.Info().Msg("Server client connected")
 }
 
 func (c *MCClient) Disconnect() {
-	c.log.Info().Msg("Kobler fra server")
+	c.log.Info().Msg("Disconnecting from server")
 	if c.cancel != nil {
 		c.cancel()
 	}
@@ -123,7 +123,7 @@ func (c *MCClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*b
 		},
 	}
 
-	// Portal-avatar fra Docker-label (mc-bridge.avatar)
+	// Portal avatar from Docker label (mc-bridge.avatar)
 	if mxc := c.Meta.AvatarMXC; mxc != "" {
 		info.Avatar = &bridgev2.Avatar{
 			ID:  networkid.AvatarID("label-avatar-" + c.Meta.ContainerName),
@@ -138,7 +138,7 @@ func ptrInt(v int) *int {
 }
 
 func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
-	// Bridge-brukeren selv er ikke en MC-spiller, ikke sett ghost-info
+	// The bridge user itself is not an MC player, don't set ghost info
 	if c.IsThisUser(ctx, ghost.ID) {
 		return nil, nil
 	}
@@ -149,16 +149,16 @@ func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bri
 		Name: &username,
 	}
 
-	// Hent avatar fra Starlight Skins API.
-	// Siden AggressiveUpdateInfo er aktivert kalles denne på hver melding,
-	// så vi sjekker om ghosten allerede har avatar satt for å unngå
-	// unødvendige HTTP-kall (bare re-sjekk hvert 1. time).
+	// Fetch avatar from Starlight Skins API.
+	// Since AggressiveUpdateInfo is enabled, this is called on every message,
+	// so we check if the ghost already has an avatar set to avoid
+	// unnecessary HTTP calls (only re-check every 1 hour).
 	if c.AvatarFetch != nil {
 		var etag string
 		var skipFetch bool
 		if meta, ok := ghost.Metadata.(*GhostMetadata); ok {
 			etag = meta.AvatarETag
-			// Hvis avatar allerede er satt og hentet for < 1 time siden, skip
+			// If avatar is already set and fetched less than 1 hour ago, skip
 			if ghost.AvatarSet && etag != "" &&
 				!meta.AvatarFetchedAt.IsZero() &&
 				time.Since(meta.AvatarFetchedAt) < 1*time.Hour {
@@ -169,15 +169,15 @@ func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bri
 			c.log.Debug().Str("player", username).
 				Str("etag", etag).
 				Bool("avatar_set", ghost.AvatarSet).
-				Msg("Henter avatar")
+				Msg("Fetching avatar")
 			result, err := c.AvatarFetch.Fetch(ctx, username, etag)
 			if err != nil {
 				c.log.Warn().Err(err).Str("player", username).
-					Msg("Avatar-henting feilet")
+					Msg("Avatar fetch failed")
 			} else if result.Changed && result.Data != nil {
 				c.log.Debug().Str("player", username).
 					Int("bytes", len(result.Data)).
-					Msg("Ny avatar mottatt, laster opp")
+					Msg("New avatar received, uploading")
 				info.Avatar = &bridgev2.Avatar{
 					ID: networkid.AvatarID(fmt.Sprintf("mc-avatar-%s-%s",
 						username, result.ETag)),
@@ -198,8 +198,8 @@ func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bri
 			} else {
 				c.log.Debug().Str("player", username).
 					Bool("changed", result.Changed).
-					Msg("Avatar uendret (304)")
-				// Oppdater FetchedAt selv ved 304 for å resette TTL
+					Msg("Avatar unchanged (304)")
+				// Update FetchedAt even on 304 to reset the TTL
 				info.ExtraUpdates = bridgev2.MergeExtraUpdaters(info.ExtraUpdates,
 					func(ctx context.Context, ghost *bridgev2.Ghost) bool {
 						meta, ok := ghost.Metadata.(*GhostMetadata)
@@ -228,17 +228,17 @@ func (c *MCClient) HandleMatrixMessage(ctx context.Context,
 
 	content := msg.Content
 
-	// Kun tekstmeldinger
+	// Only text messages
 	if content.MsgType != event.MsgText && content.MsgType != event.MsgNotice {
-		return nil, fmt.Errorf("meldingstypen %s støttes ikke", content.MsgType)
+		return nil, fmt.Errorf("message type %s is not supported", content.MsgType)
 	}
 
 	text := content.Body
 	if text == "" {
-		return nil, fmt.Errorf("tom melding")
+		return nil, fmt.Errorf("empty message")
 	}
 
-	// Hent avsendernavn fra Matrix
+	// Get sender name from Matrix
 	senderName := string(msg.Event.Sender)
 	if msg.OrigSender != nil {
 		senderName = msg.OrigSender.FormattedName
@@ -252,7 +252,7 @@ func (c *MCClient) HandleMatrixMessage(ctx context.Context,
 
 	// Send via RCON tellraw
 	if err := c.RCON.SendMessage(ctx, senderName, text); err != nil {
-		return nil, fmt.Errorf("RCON SendMessage feilet: %w", err)
+		return nil, fmt.Errorf("RCON SendMessage failed: %w", err)
 	}
 
 	msgID := networkid.MessageID(fmt.Sprintf("matrix-%s-%d",
@@ -265,7 +265,7 @@ func (c *MCClient) HandleMatrixMessage(ctx context.Context,
 	}, nil
 }
 
-// receiveLoop leser ChatLine fra log-tailing og sender til broen.
+// receiveLoop reads ChatLines from log tailing and sends them to the bridge.
 func (c *MCClient) receiveLoop(ctx context.Context) {
 	for {
 		select {
@@ -278,12 +278,12 @@ func (c *MCClient) receiveLoop(ctx context.Context) {
 }
 
 func (c *MCClient) handleChatLine(line ChatLine) {
-	// Filtrer bort non-chat events hvis bridge_all_events er false
+	// Filter out non-chat events if bridge_all_events is false
 	if !c.Connector.Config.BridgeAllEvents && line.Event != EventChat {
 		c.log.Debug().
 			Str("player", line.PlayerName).
 			Int("event", int(line.Event)).
-			Msg("Dropper non-chat event (bridge_all_events=false)")
+			Msg("Dropping non-chat event (bridge_all_events=false)")
 		return
 	}
 
@@ -291,7 +291,7 @@ func (c *MCClient) handleChatLine(line ChatLine) {
 		Str("player", line.PlayerName).
 		Str("message", line.Message).
 		Int("event", int(line.Event)).
-		Msg("Minecraft hendelse mottatt")
+		Msg("Minecraft event received")
 
 	c.UserLogin.Bridge.QueueRemoteEvent(c.UserLogin, &simplevent.Message[ChatLine]{
 		EventMeta: simplevent.EventMeta{

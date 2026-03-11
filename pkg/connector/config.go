@@ -10,27 +10,27 @@ import (
 var ExampleConfig string
 
 type Config struct {
-	// Docker-innstillinger
+	// Docker settings
 	DockerHost  string `yaml:"docker_host"`  // unix:///var/run/docker.sock
 	LabelPrefix string `yaml:"label_prefix"` // mc-bridge
 
-	// RCON-standardinnstillinger
+	// RCON default settings
 	DefaultRCONPort int `yaml:"default_rcon_port"` // 25575
 
-	// Meldingsformatering i Minecraft (tellraw-farger)
+	// Message formatting in Minecraft (tellraw colors)
 	PrefixText   string `yaml:"prefix_text"`   // [Matrix]
 	PrefixColor  string `yaml:"prefix_color"`  // light_purple
 	SenderColor  string `yaml:"sender_color"`  // aqua
 	MessageColor string `yaml:"message_color"` // white
 
-	// Provisjonering – leses også fra PROVISIONING_SECRET env-variabel
+	// Provisioning — also read from PROVISIONING_SECRET env variable
 	ProvisioningSecret string `yaml:"provisioning_secret"`
 
-	// Avatar API URL (%s erstattes med MC-brukernavn)
+	// Avatar API URL (%s is replaced with MC username)
 	AvatarAPIURL string `yaml:"avatar_api_url"`
 
-	// Bridge alle hendelser (join/leave/death/advancement) i tillegg til chat.
-	// Sett til false for å kun bridge chat-meldinger.
+	// Bridge all events (join/leave/death/advancement) in addition to chat.
+	// Set to false to only bridge chat messages.
 	BridgeAllEvents bool `yaml:"bridge_all_events"`
 }
 

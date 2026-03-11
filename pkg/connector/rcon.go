@@ -11,8 +11,8 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// RCONClient er thread-safe wrapper rundt gorcon/rcon.
-// gorcon/rcon er IKKE thread-safe – bruk alltid mutex.
+// RCONClient is a thread-safe wrapper around gorcon/rcon.
+// gorcon/rcon is NOT thread-safe — always use the mutex.
 type RCONClient struct {
 	host         string
 	port         int
@@ -40,22 +40,22 @@ func NewRCONClient(host string, port int, password string,
 	}
 }
 
-// Connect kobler til RCON med exponential backoff (maks 10 forsøk).
+// Connect connects to RCON with exponential backoff (max 10 attempts).
 func (r *RCONClient) Connect(ctx context.Context) error {
 	backoff := 2 * time.Second
 	addr := fmt.Sprintf("%s:%d", r.host, r.port)
 	for attempt := 1; attempt <= 10; attempt++ {
 		r.log.Info().Int("attempt", attempt).Str("addr", addr).
-			Msg("Kobler til RCON")
+			Msg("Connecting to RCON")
 		conn, err := rcon.Dial(addr, r.password)
 		if err == nil {
 			r.mu.Lock()
 			r.conn = conn
 			r.mu.Unlock()
-			r.log.Info().Msg("RCON tilkoblet")
+			r.log.Info().Msg("RCON connected")
 			return nil
 		}
-		r.log.Warn().Err(err).Dur("retry_in", backoff).Msg("RCON feilet")
+		r.log.Warn().Err(err).Dur("retry_in", backoff).Msg("RCON failed")
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -65,7 +65,7 @@ func (r *RCONClient) Connect(ctx context.Context) error {
 			}
 		}
 	}
-	return fmt.Errorf("kunne ikke koble til RCON etter 10 forsøk")
+	return fmt.Errorf("failed to connect to RCON after 10 attempts")
 }
 
 func (r *RCONClient) Disconnect() {
@@ -87,13 +87,13 @@ func (r *RCONClient) execute(cmd string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.conn == nil {
-		return "", fmt.Errorf("ikke tilkoblet RCON")
+		return "", fmt.Errorf("not connected to RCON")
 	}
 	resp, err := r.conn.Execute(cmd)
 	if err != nil {
 		r.conn.Close()
 		r.conn = nil
-		return "", fmt.Errorf("RCON execute feilet: %w", err)
+		return "", fmt.Errorf("RCON execute failed: %w", err)
 	}
 	return resp, nil
 }
@@ -104,8 +104,8 @@ type tellrawPart struct {
 	Bold  bool   `json:"bold,omitempty"`
 }
 
-// List returnerer en liste over online spillere via RCON "list"-kommandoen.
-// Formatet er typisk: "There are X of a max of Y players online: player1, player2"
+// List returns a list of online players via the RCON "list" command.
+// The format is typically: "There are X of a max of Y players online: player1, player2"
 func (r *RCONClient) List() ([]string, error) {
 	resp, err := r.execute("list")
 	if err != nil {
@@ -114,10 +114,10 @@ func (r *RCONClient) List() ([]string, error) {
 	return parseListResponse(resp), nil
 }
 
-// parseListResponse parser svaret fra "list"-kommandoen.
-// Formater: "There are X of a max of Y players online: p1, p2" eller bare "...online:"
+// parseListResponse parses the response from the "list" command.
+// Formats: "There are X of a max of Y players online: p1, p2" or just "...online:"
 func parseListResponse(resp string) []string {
-	// Finn etter ":"
+	// Find after ":"
 	idx := -1
 	for i, c := range resp {
 		if c == ':' {
@@ -163,8 +163,8 @@ func splitAndTrim(s string) []string {
 	return result
 }
 
-// SendMessage sender chat-melding fra Matrix til Minecraft via tellraw.
-// Bruker json.Marshal for korrekt escaping av spesialtegn i meldingstekst.
+// SendMessage sends a chat message from Matrix to Minecraft via tellraw.
+// Uses json.Marshal for correct escaping of special characters in message text.
 func (r *RCONClient) SendMessage(ctx context.Context, senderName, message string) error {
 	parts := []any{
 		"",
@@ -174,7 +174,7 @@ func (r *RCONClient) SendMessage(ctx context.Context, senderName, message string
 	}
 	jsonBytes, err := json.Marshal(parts)
 	if err != nil {
-		return fmt.Errorf("tellraw serialisering feilet: %w", err)
+		return fmt.Errorf("tellraw serialization failed: %w", err)
 	}
 	_, err = r.execute("tellraw @a " + string(jsonBytes))
 	return err

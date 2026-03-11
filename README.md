@@ -282,7 +282,7 @@ Make sure your Minecraft server containers are on the same network so the bridge
 
 ## Troubleshooting
 
-- **"Ingen RCON_PASSWORD i container-env"** – Set `RCON_PASSWORD` as an environment variable on your Minecraft container
+- **"No RCON_PASSWORD in container env"** – Set `RCON_PASSWORD` as an environment variable on your Minecraft container
 - **RCON connection failures** – Ensure RCON is enabled (`RCON_ENABLE=true`) and the bridge can reach the container on the Docker network
 - **No containers found** – Check that `mc-bridge.enable=true` label is set and the container is running
 - **Avatar fetch errors** – The Starlight Skins API requires valid Minecraft usernames; check `avatar_api_url` in config

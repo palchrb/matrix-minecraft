@@ -12,8 +12,8 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 )
 
-// MCAdminLogin implementerer bridgev2.LoginProcess og LoginProcessUserInput.
-// Eneste login-flow: oppgi provisioning secret.
+// MCAdminLogin implements bridgev2.LoginProcess and LoginProcessUserInput.
+// Only login flow: provide a provisioning secret.
 type MCAdminLogin struct {
 	User      *bridgev2.User
 	Connector *MCConnector
@@ -25,7 +25,7 @@ func (l *MCAdminLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeUserInput,
 		StepID:       "fi.mau.minecraft.enter_secret",
-		Instructions: "Oppgi provisioning secret for å autorisere Minecraft-broen.",
+		Instructions: "Enter the provisioning secret to authorize the Minecraft bridge.",
 		UserInputParams: &bridgev2.LoginUserInputParams{
 			Fields: []bridgev2.LoginInputDataField{
 				{
@@ -42,25 +42,25 @@ func (l *MCAdminLogin) Start(ctx context.Context) (*bridgev2.LoginStep, error) {
 func (l *MCAdminLogin) SubmitUserInput(ctx context.Context,
 	input map[string]string) (*bridgev2.LoginStep, error) {
 
-	// Sjekk permissions – mautrix-go evaluerer permissions-blokken i config.yaml
+	// Check permissions — mautrix-go evaluates the permissions block in config.yaml
 	if !l.User.Permissions.Admin {
-		return nil, fmt.Errorf("kun admin kan provisjonere denne broen")
+		return nil, fmt.Errorf("only admins can provision this bridge")
 	}
 
-	// Valider provisioning secret
-	// Env-variabel har prioritet over config-fil
+	// Validate provisioning secret
+	// Environment variable takes priority over config file
 	expected := os.Getenv("PROVISIONING_SECRET")
 	if expected == "" {
 		expected = l.Connector.Config.ProvisioningSecret
 	}
 	if expected == "" {
-		return nil, fmt.Errorf("provisioning secret er ikke konfigurert på serveren")
+		return nil, fmt.Errorf("provisioning secret is not configured on the server")
 	}
 	if input["provisioning_secret"] != expected {
-		return nil, fmt.Errorf("ugyldig provisioning secret")
+		return nil, fmt.Errorf("invalid provisioning secret")
 	}
 
-	// Opprett admin UserLogin
+	// Create admin UserLogin
 	loginID := networkid.UserLoginID(
 		"admin:" + strings.TrimPrefix(string(l.User.MXID), "@"))
 
@@ -80,14 +80,14 @@ func (l *MCAdminLogin) SubmitUserInput(ctx context.Context,
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("kunne ikke opprette admin-login: %w", err)
+		return nil, fmt.Errorf("failed to create admin login: %w", err)
 	}
 
-	// Start auto-provisjonering i bakgrunnen
+	// Start auto-provisioning in the background
 	go func() {
 		bgCtx := context.Background()
 		if err := l.Connector.provisioner.SyncAll(bgCtx, ul); err != nil {
-			l.Connector.log.Error().Err(err).Msg("Initial server-sync feilet")
+			l.Connector.log.Error().Err(err).Msg("Initial server sync failed")
 		}
 		go l.Connector.provisioner.WatchEvents(bgCtx, ul)
 	}()
@@ -95,7 +95,7 @@ func (l *MCAdminLogin) SubmitUserInput(ctx context.Context,
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeComplete,
 		StepID:       "fi.mau.minecraft.complete",
-		Instructions: "Autorisert. Scanner etter Minecraft-servere...",
+		Instructions: "Authorized. Scanning for Minecraft servers...",
 		CompleteParams: &bridgev2.LoginCompleteParams{
 			UserLoginID: ul.ID,
 			UserLogin:   ul,

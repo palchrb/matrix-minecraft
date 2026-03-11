@@ -25,24 +25,24 @@ func NewAvatarFetcher(apiURLTemplate string, log zerolog.Logger) *AvatarFetcher 
 }
 
 type AvatarResult struct {
-	Changed bool   // false betyr 304 Not Modified
-	Data    []byte // bilde-data, kun satt hvis Changed=true
-	ETag    string // ETag fra serveren for conditional GET
+	Changed bool   // false means 304 Not Modified
+	Data    []byte // image data, only set if Changed=true
+	ETag    string // ETag from server for conditional GET
 }
 
-// GhostMetadata lagres per ghost-bruker (MC-spiller) i databasen.
+// GhostMetadata is stored per ghost user (MC player) in the database.
 type GhostMetadata struct {
 	AvatarETag      string    `json:"avatar_etag,omitempty"`
 	AvatarFetchedAt time.Time `json:"avatar_fetched_at,omitempty"`
 }
 
-// Fetch henter avatar med ETag-basert conditional GET.
-// Sender If-None-Match hvis vi har en ETag fra forrige henting.
+// Fetch fetches an avatar using ETag-based conditional GET.
+// Sends If-None-Match if we have an ETag from a previous fetch.
 func (f *AvatarFetcher) Fetch(ctx context.Context, username string,
 	etag string) (*AvatarResult, error) {
 
 	url := fmt.Sprintf(f.apiURLTemplate, username)
-	f.log.Debug().Str("url", url).Str("username", username).Msg("Henter avatar")
+	f.log.Debug().Str("url", url).Str("username", username).Msg("Fetching avatar")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -55,36 +55,36 @@ func (f *AvatarFetcher) Fetch(ctx context.Context, username string,
 
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("avatar HTTP feilet: %w", err)
+		return nil, fmt.Errorf("avatar HTTP failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	result := &AvatarResult{
-		ETag: etag, // behold gammel ETag som fallback
+		ETag: etag, // keep old ETag as fallback
 	}
 
 	if resp.StatusCode == http.StatusNotModified {
-		f.log.Debug().Str("username", username).Msg("Avatar uendret (304)")
+		f.log.Debug().Str("username", username).Msg("Avatar unchanged (304)")
 		return result, nil // Changed=false
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("avatar API svarte %d for %s", resp.StatusCode, url)
+		return nil, fmt.Errorf("avatar API returned %d for %s", resp.StatusCode, url)
 	}
 
-	// Oppdater ETag fra respons
+	// Update ETag from response
 	if newETag := resp.Header.Get("ETag"); newETag != "" {
 		result.ETag = newETag
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return nil, fmt.Errorf("kunne ikke lese avatar: %w", err)
+		return nil, fmt.Errorf("failed to read avatar: %w", err)
 	}
 
 	result.Changed = true
 	result.Data = data
 	f.log.Debug().Str("username", username).Int("bytes", len(data)).
-		Msg("Ny avatar hentet")
+		Msg("New avatar fetched")
 	return result, nil
 }
