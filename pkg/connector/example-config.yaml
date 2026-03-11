@@ -1,35 +1,35 @@
 # Docker socket path
 docker_host: unix:///var/run/docker.sock
 
-# Label-prefix brukt på MC-containere
+# Label prefix used on MC containers
 label_prefix: mc-bridge
 
-# Standard RCON-port hvis ikke overstyrt via mc-bridge.rcon-port label
+# Default RCON port if not overridden via mc-bridge.rcon-port label
 default_rcon_port: 25575
 
-# Meldingsformatering i Minecraft (tellraw JSON-farger)
+# Message formatting in Minecraft (tellraw JSON colors)
 prefix_text: "[Matrix]"
 prefix_color: light_purple
 sender_color: aqua
 message_color: white
 
-# Provisioning secret – sett gjerne via PROVISIONING_SECRET env-variabel
-# istedenfor her, for å unngå at secret havner i config-filen
+# Provisioning secret — preferably set via PROVISIONING_SECRET env variable
+# instead of here, to avoid the secret ending up in the config file
 provisioning_secret: ""
 
-# Avatar API URL (%s erstattes med MC-brukernavn)
-# Starlight Skins støtter både Java- og Bedrock/Floodgate-spillere
+# Avatar API URL (%s is replaced with MC username)
+# Starlight Skins supports both Java and Bedrock/Floodgate players
 avatar_api_url: "https://starlightskins.lunareclipse.studio/render/default/%s/bust"
 
-# Bridge alle hendelser (join/leave/death/advancement) i tillegg til chat.
-# Sett til false for å kun bridge chat-meldinger.
+# Bridge all events (join/leave/death/advancement) in addition to chat.
+# Set to false to only bridge chat messages.
 bridge_all_events: true
 
-# ─── Anbefalte innstillinger i bridge-seksjonen av config.yaml ───
+# ─── Recommended settings in the bridge section of config.yaml ───
 #
-# Bridgen legger allerede til avsendernavn i tellraw-kommandoen,
-# så relay message_formats bør IKKE inkludere avsendernavn (unngå dobbelt visning).
-# Endre under bridge.relay.message_formats:
+# The bridge already adds the sender name in the tellraw command,
+# so relay message_formats should NOT include the sender name (to avoid double display).
+# Change under bridge.relay.message_formats:
 #
 #   message_formats:
 #       m.text: "{{ .Message }}"
@@ -41,5 +41,5 @@ bridge_all_events: true
 #       m.video: "sent a video"
 #       m.location: "sent a location"
 #
-# For å bridge meldinger fra bots (m.notice), sett:
+# To bridge messages from bots (m.notice), set:
 #   bridge_notices: true

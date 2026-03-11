@@ -14,9 +14,9 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// ansiRegex stripper ANSI escape-koder (fargekoder etc.) fra logg-linjer.
-// Minecraft-servere i TTY-modus sender ofte fargekoder som gjør at regex
-// ikke matcher selv om teksten ser riktig ut.
+// ansiRegex strips ANSI escape codes (color codes, etc.) from log lines.
+// Minecraft servers in TTY mode often send color codes that prevent regex
+// from matching even though the text looks correct.
 var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07`)
 
 // chatRegex matches Minecraft server chat lines in various log formats:
@@ -29,8 +29,9 @@ var chatRegex = regexp.MustCompile(
 )
 
 // joinLeaveRegex matches join/leave messages:
-//   [HH:MM:SS] [Server thread/INFO]: PlayerName joined the game
-//   [HH:MM:SS] [Server thread/INFO]: PlayerName left the game
+//
+//	[HH:MM:SS] [Server thread/INFO]: PlayerName joined the game
+//	[HH:MM:SS] [Server thread/INFO]: PlayerName left the game
 var joinLeaveRegex = regexp.MustCompile(
 	`^\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) ([A-Za-z0-9_.]{1,16}) (joined the game|left the game)$`,
 )
@@ -43,22 +44,23 @@ var deathRegex = regexp.MustCompile(
 )
 
 // advancementRegex matches advancement/achievement messages:
-//   [HH:MM:SS] [Server thread/INFO]: PlayerName has made the advancement [Advancement Name]
-//   [HH:MM:SS] [Server thread/INFO]: PlayerName has completed the challenge [Challenge Name]
-//   [HH:MM:SS] [Server thread/INFO]: PlayerName has reached the goal [Goal Name]
+//
+//	[HH:MM:SS] [Server thread/INFO]: PlayerName has made the advancement [Advancement Name]
+//	[HH:MM:SS] [Server thread/INFO]: PlayerName has completed the challenge [Challenge Name]
+//	[HH:MM:SS] [Server thread/INFO]: PlayerName has reached the goal [Goal Name]
 var advancementRegex = regexp.MustCompile(
 	`^\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) ([A-Za-z0-9_.]{1,16}) (has (?:made the advancement|completed the challenge|reached the goal) \[.+\])$`,
 )
 
-// EventType angir hvilken type hendelse en ChatLine representerer.
+// EventType indicates which type of event a ChatLine represents.
 type EventType int
 
 const (
-	EventChat        EventType = iota // Vanlig chat-melding
-	EventJoin                         // Spiller logget inn
-	EventLeave                        // Spiller logget ut
-	EventDeath                        // Spiller døde
-	EventAdvancement                  // Spiller fikk en advancement
+	EventChat        EventType = iota // Regular chat message
+	EventJoin                         // Player joined the game
+	EventLeave                        // Player left the game
+	EventDeath                        // Player died
+	EventAdvancement                  // Player got an advancement
 )
 
 type ChatLine struct {
@@ -84,9 +86,9 @@ func NewLogTailer(docker *dockerclient.Client, containerName string,
 	}
 }
 
-// Start leser Docker-logg og sender ChatLine på lineCh.
-// Kjører til ctx kanselleres. Har intern retry-logikk.
-// Kall alltid i goroutine.
+// Start reads Docker logs and sends ChatLines on lineCh.
+// Runs until ctx is cancelled. Has internal retry logic.
+// Always call in a goroutine.
 func (t *LogTailer) Start(ctx context.Context, lineCh chan<- ChatLine) {
 	backoff := 2 * time.Second
 	for {
@@ -95,7 +97,7 @@ func (t *LogTailer) Start(ctx context.Context, lineCh chan<- ChatLine) {
 				return
 			}
 			t.log.Warn().Err(err).Dur("retry_in", backoff).
-				Msg("Logg-tailing feilet, prøver igjen")
+				Msg("Log tailing failed, retrying")
 		}
 		select {
 		case <-ctx.Done():
@@ -135,7 +137,7 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 			defer pw.Close()
 			if _, err := stdcopy.StdCopy(pw, io.Discard, reader); err != nil {
 				if ctx.Err() == nil {
-					t.log.Warn().Err(err).Msg("stdcopy avsluttet")
+					t.log.Warn().Err(err).Msg("stdcopy ended")
 				}
 			}
 		}()
@@ -148,7 +150,7 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 
 	scanner := bufio.NewScanner(logReader)
 	for scanner.Scan() {
-		// Strip ANSI-fargekoder før matching
+		// Strip ANSI color codes before matching
 		line := ansiRegex.ReplaceAllString(scanner.Text(), "")
 		var cl *ChatLine
 
@@ -189,14 +191,14 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 				Str("player", cl.PlayerName).
 				Int("event", int(cl.Event)).
 				Str("message", cl.Message).
-				Msg("Matchet logg-linje")
+				Msg("Matched log line")
 			select {
 			case lineCh <- *cl:
 			case <-ctx.Done():
 				return nil
 			}
 		} else if len(line) > 0 {
-			t.log.Trace().Str("line", line).Msg("Umatchet logg-linje")
+			t.log.Trace().Str("line", line).Msg("Unmatched log line")
 		}
 	}
 

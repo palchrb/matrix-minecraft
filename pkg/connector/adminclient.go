@@ -10,8 +10,8 @@ import (
 	"maunium.net/go/mautrix/event"
 )
 
-// MCAdminClient implementerer bridgev2.NetworkAPI for admin-login.
-// Admin-logins har ingen direkte servertilkobling – de styrer provisjonering.
+// MCAdminClient implements bridgev2.NetworkAPI for admin logins.
+// Admin logins have no direct server connection — they control provisioning.
 type MCAdminClient struct {
 	UserLogin *bridgev2.UserLogin
 	Connector *MCConnector
@@ -20,7 +20,7 @@ type MCAdminClient struct {
 var _ bridgev2.NetworkAPI = (*MCAdminClient)(nil)
 
 func (c *MCAdminClient) Connect(ctx context.Context) {
-	// Admin-login har ingen persistent tilkobling
+	// Admin login has no persistent connection
 }
 
 func (c *MCAdminClient) Disconnect() {}
@@ -30,7 +30,7 @@ func (c *MCAdminClient) IsLoggedIn() bool {
 }
 
 func (c *MCAdminClient) LogoutRemote(ctx context.Context) {
-	// Ingenting å rydde opp for admin
+	// Nothing to clean up for admin
 }
 
 func (c *MCAdminClient) IsThisUser(ctx context.Context, userID networkid.UserID) bool {
@@ -38,11 +38,11 @@ func (c *MCAdminClient) IsThisUser(ctx context.Context, userID networkid.UserID)
 }
 
 func (c *MCAdminClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
-	return nil, fmt.Errorf("admin-login har ingen chat-info")
+	return nil, fmt.Errorf("admin login has no chat info")
 }
 
 func (c *MCAdminClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
-	return nil, fmt.Errorf("admin-login har ingen brukerinfo")
+	return nil, fmt.Errorf("admin login has no user info")
 }
 
 func (c *MCAdminClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal) *event.RoomFeatures {
@@ -51,7 +51,7 @@ func (c *MCAdminClient) GetCapabilities(ctx context.Context, portal *bridgev2.Po
 
 func (c *MCAdminClient) HandleMatrixMessage(ctx context.Context,
 	msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
-	return nil, fmt.Errorf("admin-login kan ikke sende meldinger")
+	return nil, fmt.Errorf("admin login cannot send messages")
 }
 
 // Unused but kept to satisfy the interface for future use.

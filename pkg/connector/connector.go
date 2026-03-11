@@ -18,9 +18,9 @@ import (
 	"maunium.net/go/mautrix/id"
 )
 
-// MCLoginMetadata er den eneste metadata-typen for alle UserLogin-rader.
-// Admin-logins har kun CreatedAt satt.
-// Server-logins har alle feltene satt.
+// MCLoginMetadata is the only metadata type for all UserLogin rows.
+// Admin logins only have CreatedAt set.
+// Server logins have all fields set.
 type MCLoginMetadata struct {
 	CreatedAt     time.Time `json:"created_at"`
 	ContainerID   string    `json:"container_id,omitempty"`
@@ -29,10 +29,10 @@ type MCLoginMetadata struct {
 	RCONHost      string    `json:"rcon_host,omitempty"`
 	RCONPort      int       `json:"rcon_port,omitempty"`
 	RCONPassword  string    `json:"rcon_password,omitempty"`
-	AvatarMXC     string    `json:"avatar_mxc,omitempty"` // Fra mc-bridge.avatar Docker-label
+	AvatarMXC     string    `json:"avatar_mxc,omitempty"` // From mc-bridge.avatar Docker label
 }
 
-// MCConnector implementerer bridgev2.NetworkConnector.
+// MCConnector implements bridgev2.NetworkConnector.
 type MCConnector struct {
 	br             *bridgev2.Bridge
 	Config         Config
@@ -40,7 +40,7 @@ type MCConnector struct {
 	provisioner    *Provisioner
 	avatarFetcher  *AvatarFetcher
 	log            zerolog.Logger
-	networkIconMXC id.ContentURIString // Bot-avatar fra config, brukes som space-ikon
+	networkIconMXC id.ContentURIString // Bot avatar from config, used as space icon
 }
 
 var _ bridgev2.NetworkConnector = (*MCConnector)(nil)
@@ -49,14 +49,14 @@ func (mc *MCConnector) Init(bridge *bridgev2.Bridge) {
 	mc.br = bridge
 	mc.log = bridge.Log.With().Str("component", "mc-connector").Logger()
 
-	// Env-variabel overstyrer config-fil for provisioning secret
+	// Environment variable overrides config file for provisioning secret
 	if s := os.Getenv("PROVISIONING_SECRET"); s != "" {
 		mc.Config.ProvisioningSecret = s
 	}
 }
 
 func (mc *MCConnector) Start(ctx context.Context) error {
-	mc.log.Info().Msg("Starter Minecraft connector")
+	mc.log.Info().Msg("Starting Minecraft connector")
 
 	var err error
 	mc.docker, err = dockerclient.NewClientWithOpts(
@@ -64,75 +64,75 @@ func (mc *MCConnector) Start(ctx context.Context) error {
 		dockerclient.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
-		return fmt.Errorf("Docker-klient feilet: %w", err)
+		return fmt.Errorf("Docker client failed: %w", err)
 	}
 
 	if _, err := mc.docker.Ping(ctx); err != nil {
-		return fmt.Errorf("Docker API ikke tilgjengelig: %w", err)
+		return fmt.Errorf("Docker API not available: %w", err)
 	}
-	mc.log.Info().Msg("Docker API tilkoblet")
+	mc.log.Info().Msg("Docker API connected")
 
 	avatarURL := mc.Config.AvatarAPIURL
 	if avatarURL == "" {
 		avatarURL = "https://starlightskins.lunareclipse.studio/render/default/%s/bust"
-		mc.log.Info().Str("url", avatarURL).Msg("avatar_api_url ikke satt, bruker standard")
+		mc.log.Info().Str("url", avatarURL).Msg("avatar_api_url not set, using default")
 	}
 	mc.avatarFetcher = NewAvatarFetcher(avatarURL, mc.log)
 	mc.provisioner = NewProvisioner(mc.docker, mc.br, &mc.Config, mc, mc.log)
 
-	// Hent bot-avatar fra config for å bruke som space-ikon (NetworkIcon)
+	// Get bot avatar from config to use as space icon (NetworkIcon)
 	if mx, ok := mc.br.Matrix.(*matrix.Connector); ok {
 		if avatar := mx.Config.AppService.Bot.ParsedAvatar; !avatar.IsEmpty() {
 			mc.networkIconMXC = id.ContentURIString(avatar.String())
-			mc.log.Info().Str("mxc", string(mc.networkIconMXC)).Msg("Space-ikon satt fra bot-avatar")
+			mc.log.Info().Str("mxc", string(mc.networkIconMXC)).Msg("Space icon set from bot avatar")
 		}
 	}
 
-	// Ved restart: gjenopprett server-tilkoblinger hvis admin allerede er logget inn
+	// On restart: restore server connections if admin is already logged in
 	go mc.restoreOnRestart(ctx)
 
 	return nil
 }
 
-// restoreOnRestart finner admin-login i cache og gjenoppretter provisjonering.
-// Kalles automatisk ved bridge-oppstart.
+// restoreOnRestart finds admin login in cache and restores provisioning.
+// Called automatically on bridge startup.
 func (mc *MCConnector) restoreOnRestart(ctx context.Context) {
-	// Vent litt for at logins skal lastes fra DB
+	// Wait briefly for logins to be loaded from DB
 	time.Sleep(2 * time.Second)
 
-	// Hent alle brukere med logins fra DB
+	// Get all users with logins from DB
 	userIDs, err := mc.br.DB.UserLogin.GetAllUserIDsWithLogins(ctx)
 	if err != nil {
-		mc.log.Error().Err(err).Msg("Kunne ikke hente bruker-IDer for restore")
+		mc.log.Error().Err(err).Msg("Failed to get user IDs for restore")
 		return
 	}
 	for _, userID := range userIDs {
 		user, err := mc.br.GetUserByMXID(ctx, userID)
 		if err != nil {
-			mc.log.Error().Err(err).Msg("Kunne ikke hente bruker for restore")
+			mc.log.Error().Err(err).Msg("Failed to get user for restore")
 			continue
 		}
 		for _, login := range user.GetUserLogins() {
 			if strings.HasPrefix(string(login.ID), "admin:") {
-				mc.log.Info().Msg("Admin-login funnet, gjenoppretter server-tilkoblinger")
+				mc.log.Info().Msg("Admin login found, restoring server connections")
 				if err := mc.provisioner.SyncAll(ctx, login); err != nil {
-					mc.log.Error().Err(err).Msg("Restore SyncAll feilet")
+					mc.log.Error().Err(err).Msg("Restore SyncAll failed")
 				}
 				go mc.provisioner.WatchEvents(ctx, login)
 			}
-			// Oppdater space-avatar hvis den er satt og spacet eksisterer
+			// Update space avatar if set and space exists
 			mc.updateSpaceAvatar(ctx, login)
 		}
 	}
 }
 
-// updateSpaceAvatar oppdaterer space-avataren for en eksisterende login,
-// men bare hvis den faktisk har endret seg.
+// updateSpaceAvatar updates the space avatar for an existing login,
+// but only if it has actually changed.
 func (mc *MCConnector) updateSpaceAvatar(ctx context.Context, login *bridgev2.UserLogin) {
 	if mc.networkIconMXC == "" || login.SpaceRoom == "" {
 		return
 	}
-	// Sjekk nåværende avatar først for å unngå unødvendige state events
+	// Check current avatar first to avoid unnecessary state events
 	if stateGetter, ok := mc.br.Matrix.(bridgev2.MatrixConnectorWithArbitraryRoomState); ok {
 		currentState, err := stateGetter.GetStateEvent(ctx, login.SpaceRoom, event.StateRoomAvatar, "")
 		if err == nil && currentState != nil {
@@ -140,7 +140,7 @@ func (mc *MCConnector) updateSpaceAvatar(ctx context.Context, login *bridgev2.Us
 				if currentState.Content.AsRoomAvatar().URL == mc.networkIconMXC {
 					mc.log.Debug().
 						Str("space_room", string(login.SpaceRoom)).
-						Msg("Space-avatar er allerede oppdatert, hopper over")
+						Msg("Space avatar already up to date, skipping")
 					return
 				}
 			}
@@ -154,21 +154,21 @@ func (mc *MCConnector) updateSpaceAvatar(ctx context.Context, login *bridgev2.Us
 	if err != nil {
 		mc.log.Warn().Err(err).
 			Str("space_room", string(login.SpaceRoom)).
-			Msg("Kunne ikke oppdatere space-avatar")
+			Msg("Failed to update space avatar")
 	} else {
 		mc.log.Info().
 			Str("space_room", string(login.SpaceRoom)).
 			Str("mxc", string(mc.networkIconMXC)).
-			Msg("Space-avatar oppdatert")
+			Msg("Space avatar updated")
 	}
 }
 
-// initServerClient initialiserer MCClient for en server-login.
-// Brukes både ved første provisjonering og ved restart (LoadUserLogin).
+// initServerClient initializes MCClient for a server login.
+// Used both during initial provisioning and on restart (LoadUserLogin).
 func (mc *MCConnector) initServerClient(login *bridgev2.UserLogin) error {
 	meta, ok := login.Metadata.(*MCLoginMetadata)
 	if !ok || meta.ContainerName == "" {
-		return fmt.Errorf("ugyldig server-login metadata")
+		return fmt.Errorf("invalid server login metadata")
 	}
 	login.Client = &MCClient{
 		UserLogin:   login,
@@ -183,8 +183,8 @@ func (mc *MCConnector) initServerClient(login *bridgev2.UserLogin) error {
 
 func (mc *MCConnector) GetCapabilities() *bridgev2.NetworkGeneralCapabilities {
 	return &bridgev2.NetworkGeneralCapabilities{
-		// Re-request brukerinfo på innkommende meldinger slik at avatar-henting
-		// forsøkes igjen hvis den feilet første gang.
+		// Re-request user info on incoming messages so that avatar fetching
+		// is retried if it failed the first time.
 		AggressiveUpdateInfo: true,
 	}
 }
@@ -230,13 +230,13 @@ func (mc *MCConnector) LoadUserLogin(ctx context.Context,
 		return mc.initServerClient(login)
 	}
 
-	return fmt.Errorf("ukjent login-ID format: %s", login.ID)
+	return fmt.Errorf("unknown login ID format: %s", login.ID)
 }
 
 func (mc *MCConnector) GetLoginFlows() []bridgev2.LoginFlow {
 	return []bridgev2.LoginFlow{{
 		Name:        "Provisioning Secret",
-		Description: "Autoriser broen med provisioning secret",
+		Description: "Authorize the bridge with a provisioning secret",
 		ID:          "provisioning-secret",
 	}}
 }
@@ -244,17 +244,17 @@ func (mc *MCConnector) GetLoginFlows() []bridgev2.LoginFlow {
 func (mc *MCConnector) CreateLogin(ctx context.Context,
 	user *bridgev2.User, flowID string) (bridgev2.LoginProcess, error) {
 	if flowID != "provisioning-secret" {
-		return nil, fmt.Errorf("ukjent login-flow: %s", flowID)
+		return nil, fmt.Errorf("unknown login flow: %s", flowID)
 	}
 	return &MCAdminLogin{User: user, Connector: mc}, nil
 }
 
-// makePortalKey lager portal-nøkkel for en server.
-// Ingen Receiver – portalen er delt (alle bruker samme rom).
+// makePortalKey creates a portal key for a server.
+// No Receiver — the portal is shared (all users use the same room).
 func makePortalKey(containerName string) networkid.PortalKey {
 	return networkid.PortalKey{
 		ID: networkid.PortalID(containerName),
-		// Bevisst ingen Receiver: admin-styrt delt portal
+		// Intentionally no Receiver: admin-managed shared portal
 	}
 }
 
