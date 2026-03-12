@@ -119,9 +119,9 @@ func (mc *MCConnector) restoreOnRestart(ctx context.Context) {
 					mc.log.Error().Err(err).Msg("Restore SyncAll failed")
 				}
 				go mc.provisioner.WatchEvents(ctx, login)
+				// Update space avatar only for admin logins (server logins share the same space)
+				mc.updateSpaceAvatar(ctx, login)
 			}
-			// Update space avatar if set and space exists
-			mc.updateSpaceAvatar(ctx, login)
 		}
 	}
 }
