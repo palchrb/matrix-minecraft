@@ -198,16 +198,8 @@ func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bri
 				c.log.Debug().Str("player", username).
 					Bool("changed", result.Changed).
 					Msg("Avatar unchanged (304)")
-				// Update FetchedAt even on 304 to reset the TTL
-				info.ExtraUpdates = bridgev2.MergeExtraUpdaters(info.ExtraUpdates,
-					func(ctx context.Context, ghost *bridgev2.Ghost) bool {
-						meta, ok := ghost.Metadata.(*GhostMetadata)
-						if !ok {
-							return false
-						}
-						meta.AvatarFetchedAt = time.Now()
-						return true
-					})
+				// No DB update needed on 304 — the existing ETag and TTL
+				// will naturally expire and trigger a new fetch later.
 			}
 		}
 	}
