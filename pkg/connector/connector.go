@@ -136,13 +136,11 @@ func (mc *MCConnector) updateSpaceAvatar(ctx context.Context, login *bridgev2.Us
 	if stateGetter, ok := mc.br.Matrix.(bridgev2.MatrixConnectorWithArbitraryRoomState); ok {
 		currentState, err := stateGetter.GetStateEvent(ctx, login.SpaceRoom, event.StateRoomAvatar, "")
 		if err == nil && currentState != nil {
-			if parseErr := currentState.Content.ParseRaw(event.StateRoomAvatar); parseErr == nil {
-				if currentState.Content.AsRoomAvatar().URL == mc.networkIconMXC {
-					mc.log.Debug().
-						Str("space_room", string(login.SpaceRoom)).
-						Msg("Space avatar already up to date, skipping")
-					return
-				}
+			if avatarContent := currentState.Content.AsRoomAvatar(); avatarContent != nil && avatarContent.URL == mc.networkIconMXC {
+				mc.log.Debug().
+					Str("space_room", string(login.SpaceRoom)).
+					Msg("Space avatar already up to date, skipping")
+				return
 			}
 		}
 	}
