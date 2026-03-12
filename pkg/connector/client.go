@@ -115,7 +115,6 @@ func (c *MCClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*b
 			Members: []bridgev2.ChatMember{{
 				EventSender: bridgev2.EventSender{
 					IsFromMe: true,
-					Sender:   networkid.UserID(c.UserLogin.UserMXID),
 				},
 				Membership: event.MembershipJoin,
 				PowerLevel: ptrInt(50),
