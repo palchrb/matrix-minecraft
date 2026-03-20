@@ -38,6 +38,12 @@ func (c *MCClient) Connect(ctx context.Context) {
 	c.log = c.Connector.log.With().
 		Str("container", c.Meta.ContainerName).Logger()
 
+	// Stop any existing log tailer / receive loop before reconnecting
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.RCON.Disconnect()
+
 	c.lineCh = make(chan ChatLine, 64)
 	tailCtx, cancel := context.WithCancel(context.Background())
 	c.cancel = cancel
