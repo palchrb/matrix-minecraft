@@ -276,6 +276,13 @@ func (c *MCClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal)
 func (c *MCClient) HandleMatrixMessage(ctx context.Context,
 	msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
 
+	containerName := string(msg.Portal.ID)
+	c.log.Info().
+		Str("container", containerName).
+		Str("matrix_event", string(msg.Event.ID)).
+		Str("sender", string(msg.Event.Sender)).
+		Msg("Received Matrix message for Minecraft")
+
 	content := msg.Content
 
 	// Only text messages
@@ -288,7 +295,6 @@ func (c *MCClient) HandleMatrixMessage(ctx context.Context,
 		return nil, fmt.Errorf("empty message")
 	}
 
-	containerName := string(msg.Portal.ID)
 	s := c.getServer(containerName)
 	if s == nil {
 		return nil, fmt.Errorf("no active server for portal %s", containerName)
@@ -482,7 +488,12 @@ func (c *MCClient) startServer(ctx context.Context, p mcServerParams) error {
 	go srv.logTailer.Start(srvCtx, srv.lineCh)
 	go c.receiveLoop(srvCtx, srv)
 
-	// Ensure the Matrix portal exists for this container.
+	// Ensure the Matrix portal exists for this container and that the admin
+	// login is marked as "in" it (creating the user_portal row). Without a
+	// user_portal row for the admin, bridgev2's FindPreferredLogin can't
+	// route inbound Matrix messages to HandleMatrixMessage at all. Legacy
+	// `server:*` rows — deleted on startup — used to own those rows and
+	// took them along when the FK cascaded, so we have to recreate them.
 	portalKey := makePortalKey(p.ContainerName)
 	portal, err := c.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
 	if err != nil {
@@ -492,19 +503,33 @@ func (c *MCClient) startServer(ctx context.Context, p mcServerParams) error {
 	}
 
 	chatInfo, _ := c.GetChatInfo(ctx, portal)
-	if portal.MXID == "" {
-		if createErr := portal.CreateMatrixRoom(ctx, c.UserLogin, chatInfo); createErr != nil {
-			c.log.Warn().Err(createErr).Str("container", p.ContainerName).
-				Msg("Failed to create Matrix room")
-		} else {
-			c.log.Info().
-				Str("container", p.ContainerName).
-				Str("room", string(portal.MXID)).
-				Msg("Matrix room created for server")
-		}
-	} else {
-		// Existing room: refresh name/avatar and re-mark the admin as being
-		// in this portal so it gets added to the shared space.
+
+	// CreateMatrixRoom is idempotent: if the portal already has an MXID it
+	// just calls source.MarkInPortal(ctx, portal) and returns, which is
+	// exactly what we need here to (re-)seed the user_portal row. If the
+	// portal is brand new it runs the full creation flow through the portal
+	// event queue.
+	if createErr := portal.CreateMatrixRoom(ctx, c.UserLogin, chatInfo); createErr != nil {
+		c.log.Warn().Err(createErr).Str("container", p.ContainerName).
+			Msg("CreateMatrixRoom failed")
+	}
+
+	// Belt-and-suspenders: explicitly MarkInPortal so we do not rely on
+	// UpdateInfo or CreateMatrixRoom reaching the MarkInPortal call for
+	// existing rooms. This is a no-op if the login is already cached as
+	// being in the portal.
+	c.UserLogin.MarkInPortal(ctx, portal)
+
+	c.log.Info().
+		Str("container", p.ContainerName).
+		Str("portal_mxid", string(portal.MXID)).
+		Str("login_id", string(c.UserLogin.ID)).
+		Msg("Server portal ready and admin marked in portal")
+
+	// Push a fresh ChatInfo onto the room so name/avatar reflect the
+	// current container labels. Safe to call on every startup — bridgev2
+	// skips state events that would not change anything.
+	if portal.MXID != "" {
 		portal.UpdateInfo(ctx, chatInfo, c.UserLogin, nil, time.Time{})
 	}
 
@@ -521,7 +546,9 @@ func (c *MCClient) updatePortalInfo(ctx context.Context, containerName string) {
 	}
 	chatInfo, _ := c.GetChatInfo(ctx, portal)
 	portal.UpdateInfo(ctx, chatInfo, c.UserLogin, nil, time.Time{})
-	c.log.Debug().Str("container", containerName).
+	// Also re-mark so user_portal stays consistent.
+	c.UserLogin.MarkInPortal(ctx, portal)
+	c.log.Info().Str("container", containerName).
 		Msg("Portal info updated")
 }
 
@@ -656,11 +683,12 @@ func (c *MCClient) handleChatLine(line ChatLine) {
 		return
 	}
 
-	c.log.Debug().
+	c.log.Info().
 		Str("player", line.PlayerName).
+		Str("container", line.ContainerName).
 		Str("message", line.Message).
 		Int("event", int(line.Event)).
-		Msg("Minecraft event received")
+		Msg("Minecraft event received, queueing to bridge")
 
 	c.UserLogin.Bridge.QueueRemoteEvent(c.UserLogin, &simplevent.Message[ChatLine]{
 		EventMeta: simplevent.EventMeta{
