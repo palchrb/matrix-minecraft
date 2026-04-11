@@ -72,10 +72,7 @@ func (l *MCAdminLogin) SubmitUserInput(ctx context.Context,
 		},
 	}, &bridgev2.NewLoginParams{
 		LoadUserLogin: func(ctx context.Context, login *bridgev2.UserLogin) error {
-			login.Client = &MCAdminClient{
-				UserLogin: login,
-				Connector: l.Connector,
-			}
+			login.Client = newMCClient(l.Connector, login)
 			return nil
 		},
 	})
@@ -83,14 +80,10 @@ func (l *MCAdminLogin) SubmitUserInput(ctx context.Context,
 		return nil, fmt.Errorf("failed to create admin login: %w", err)
 	}
 
-	// Start auto-provisioning in the background
-	go func() {
-		bgCtx := context.Background()
-		if err := l.Connector.provisioner.SyncAll(bgCtx, ul); err != nil {
-			l.Connector.log.Error().Err(err).Msg("Initial server sync failed")
-		}
-		go l.Connector.provisioner.WatchEvents(bgCtx, ul)
-	}()
+	// bridgev2 does not call Connect() after NewLogin — only on restart via
+	// StartLogins. Fire it off ourselves so Docker discovery kicks in
+	// immediately and the user sees rooms without having to restart.
+	go ul.Client.Connect(ul.Log.WithContext(context.Background()))
 
 	return &bridgev2.LoginStep{
 		Type:         bridgev2.LoginStepTypeComplete,
