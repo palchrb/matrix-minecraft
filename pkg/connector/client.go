@@ -74,8 +74,11 @@ func newMCClient(conn *MCConnector, login *bridgev2.UserLogin) *MCClient {
 
 // Connect is called by bridgev2 on startup for every loaded login, and
 // manually by the login flow after the admin provides the provisioning
-// secret. It ensures the admin's shared space exists, discovers all
-// labeled Minecraft containers, and starts the Docker event watcher.
+// secret. It discovers all labeled Minecraft containers and starts the
+// Docker event watcher. The admin login's Matrix Space is created lazily
+// by bridgev2 the first time a portal triggers MarkInPortal (with the
+// NetworkIcon we declare in GetName() as its initial avatar), so there's
+// no need to pre-create it here.
 func (c *MCClient) Connect(ctx context.Context) {
 	// Cancel any previous Connect()'s background work before starting fresh.
 	if c.cancel != nil {
@@ -84,17 +87,6 @@ func (c *MCClient) Connect(ctx context.Context) {
 	bgCtx, cancel := context.WithCancel(c.UserLogin.Bridge.BackgroundCtx)
 	c.ctx = bgCtx
 	c.cancel = cancel
-
-	// Make sure the admin login's Matrix Space is created eagerly. All
-	// per-server portals will be added to this single shared space by
-	// bridgev2's MarkInPortal flow.
-	if _, err := c.UserLogin.GetSpaceRoom(ctx); err != nil {
-		c.log.Warn().Err(err).Msg("Failed to ensure shared space room exists")
-	}
-
-	// Update the space avatar to match the bot avatar in config, in case
-	// it changed.
-	c.Connector.updateSpaceAvatar(ctx, c.UserLogin)
 
 	if err := c.discoverAll(ctx); err != nil {
 		c.log.Error().Err(err).Msg("Initial Docker discovery failed")
@@ -105,6 +97,13 @@ func (c *MCClient) Connect(ctx context.Context) {
 		})
 		return
 	}
+
+	// Push the current bot avatar onto the shared space in case it changed
+	// in config.yaml since the space was first created. This runs after
+	// discoverAll so the space has had a chance to be created; if it
+	// hasn't been yet (very first Connect with no servers), updateSpaceAvatar
+	// silently no-ops and the correct avatar is used at creation time anyway.
+	c.Connector.updateSpaceAvatar(ctx, c.UserLogin)
 
 	go c.watchDockerEvents(bgCtx)
 
