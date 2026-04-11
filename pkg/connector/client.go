@@ -274,16 +274,41 @@ func (c *MCClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal)
 // HandleMatrixMessage routes a Matrix message to the correct server's RCON.
 // portal.ID is the container name, so we look it up in the servers map.
 func (c *MCClient) HandleMatrixMessage(ctx context.Context,
-	msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, error) {
+	msg *bridgev2.MatrixMessage) (resp *bridgev2.MatrixMessageResponse, retErr error) {
 
 	containerName := string(msg.Portal.ID)
-	c.log.Info().
+	log := c.log.With().
 		Str("container", containerName).
 		Str("matrix_event", string(msg.Event.ID)).
 		Str("sender", string(msg.Event.Sender)).
-		Msg("Received Matrix message for Minecraft")
+		Logger()
 
+	log.Info().Msg("Received Matrix message for Minecraft")
+
+	// Defer a result log so every path through this function is visible in
+	// the logs, even if it panics or returns silently.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error().
+				Interface("panic", r).
+				Msg("HandleMatrixMessage panicked")
+			retErr = fmt.Errorf("handler panicked: %v", r)
+		}
+		if retErr != nil {
+			log.Warn().Err(retErr).Msg("HandleMatrixMessage returning error")
+		} else {
+			log.Info().Msg("HandleMatrixMessage returning success")
+		}
+	}()
+
+	if msg.Content == nil {
+		return nil, fmt.Errorf("nil content in MatrixMessage")
+	}
 	content := msg.Content
+	log.Debug().
+		Str("msgtype", string(content.MsgType)).
+		Int("body_len", len(content.Body)).
+		Msg("Parsed Matrix content")
 
 	// Only text messages
 	if content.MsgType != event.MsgText && content.MsgType != event.MsgNotice {
@@ -299,23 +324,42 @@ func (c *MCClient) HandleMatrixMessage(ctx context.Context,
 	if s == nil {
 		return nil, fmt.Errorf("no active server for portal %s", containerName)
 	}
+	if s.rcon == nil {
+		return nil, fmt.Errorf("server %s has no RCON client", containerName)
+	}
+	if !s.rcon.IsConnected() {
+		log.Warn().Msg("RCON is not connected, attempting to reconnect before sending")
+		if err := s.rcon.Connect(ctx); err != nil {
+			return nil, fmt.Errorf("RCON reconnect failed: %w", err)
+		}
+	}
 
 	// Get sender name from Matrix
 	senderName := string(msg.Event.Sender)
 	if msg.OrigSender != nil {
 		senderName = msg.OrigSender.FormattedName
+		log.Debug().Str("relay_sender", senderName).Msg("Using relay sender name")
 	} else {
 		member, err := msg.Portal.Bridge.Matrix.GetMemberInfo(ctx,
 			msg.Portal.MXID, msg.Event.Sender)
-		if err == nil && member != nil && member.Displayname != "" {
+		if err != nil {
+			log.Warn().Err(err).Msg("GetMemberInfo failed, falling back to MXID as sender name")
+		} else if member != nil && member.Displayname != "" {
 			senderName = member.Displayname
 		}
 	}
+
+	log.Info().
+		Str("final_sender_name", senderName).
+		Int("text_len", len(text)).
+		Msg("Forwarding message to RCON")
 
 	// Send via RCON tellraw
 	if err := s.rcon.SendMessage(ctx, senderName, text); err != nil {
 		return nil, fmt.Errorf("RCON SendMessage failed: %w", err)
 	}
+
+	log.Info().Msg("RCON SendMessage succeeded")
 
 	msgID := networkid.MessageID(fmt.Sprintf("matrix-%s-%d",
 		msg.Event.ID, time.Now().UnixMilli()))
