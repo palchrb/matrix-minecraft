@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -198,8 +199,20 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 			lastHeartbeat = time.Now()
 		}
 
-		// Strip ANSI color codes before matching
+		// Strip ANSI color codes before matching.
 		line := ansiRegex.ReplaceAllString(scanner.Text(), "")
+
+		// Handle JLine-style interactive server consoles (Paper/Spigot with
+		// the "> " prompt). Those write the prompt, then on every new log
+		// line emit "\r<CSI>K<actual text>" so the terminal erases the
+		// prompt before displaying the line. bufio.Scanner doesn't simulate
+		// terminal rendering, so we see the prompt as a prefix followed by
+		// \r and the actual text. Mimic what a terminal would render by
+		// dropping everything up to the last carriage return.
+		if idx := strings.LastIndex(line, "\r"); idx >= 0 {
+			line = line[idx+1:]
+		}
+
 		var cl *ChatLine
 
 		if m := chatRegex.FindStringSubmatch(line); m != nil {
