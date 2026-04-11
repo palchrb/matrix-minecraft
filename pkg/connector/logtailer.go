@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,28 +20,43 @@ import (
 // from matching even though the text looks correct.
 var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07`)
 
+// logPrefix matches the timestamp + thread tag at the beginning of every
+// Minecraft server log line, covering the known formats:
+//   - Vanilla:   [HH:MM:SS] [Server thread/INFO]:
+//   - Paper:     [HH:MM:SS INFO]:
+//   - Paper with extra fields: [HH:MM:SS INFO] [PluginName]:
+// The [^\]]* inside the timestamp bracket tolerates "[16:31:38 INFO]" as
+// well as "[16:31:38]".
+const logPrefix = `\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) `
+
+// chatPrefix matches zero or more bracketed prefixes before the "<player>"
+// token. Covers plain chat, "[Not Secure]" marker, and rank plugins like
+// [Admin] or [VIP] [Staff] <player>.
+const chatPrefix = `(?:\[[^\]]+\] )*`
+
 // chatRegex matches Minecraft server chat lines in various log formats:
 //   - Vanilla:    [HH:MM:SS] [Server thread/INFO]: <PlayerName> message
 //   - Paper/etc:  [HH:MM:SS INFO]: <PlayerName> message
 //   - Not Secure: [HH:MM:SS INFO]: [Not Secure] <PlayerName> message
+//   - Rank plugins: [HH:MM:SS INFO]: [Admin] <PlayerName> message
 //   - Floodgate:  player names may start with '.' (e.g. .palchrb)
 var chatRegex = regexp.MustCompile(
-	`^\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) (?:\[Not Secure\] )?<([A-Za-z0-9_.]{1,16})> (.+)$`,
+	`^` + logPrefix + chatPrefix + `<([A-Za-z0-9_.]{1,16})> (.+)$`,
 )
 
-// joinLeaveRegex matches join/leave messages:
+// joinLeaveRegex matches vanilla join/leave messages:
 //
 //	[HH:MM:SS] [Server thread/INFO]: PlayerName joined the game
 //	[HH:MM:SS] [Server thread/INFO]: PlayerName left the game
 var joinLeaveRegex = regexp.MustCompile(
-	`^\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) ([A-Za-z0-9_.]{1,16}) (joined the game|left the game)$`,
+	`^` + logPrefix + `([A-Za-z0-9_.]{1,16}) (joined the game|left the game)$`,
 )
 
 // deathRegex matches death messages. Minecraft death messages always start with the player name
 // followed by a death message verb (was slain, was shot, drowned, fell, etc.)
 // Captures: [1] player name, [2] full death message after player name
 var deathRegex = regexp.MustCompile(
-	`^\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) ([A-Za-z0-9_.]{1,16}) ((?:was slain|was shot|was killed|was fireballed|was pummeled|was squished|was squashed|drowned|blew up|was blown up|was burnt|went up in flames|walked into fire|burned to death|tried to swim in lava|suffocated in a wall|starved to death|fell from|fell off|fell out of|hit the ground|was doomed to fall|was struck by lightning|froze to death|was impaled|was stung to death|was obliterated|discovered the floor was lava|didn't want to live|experienced kinetic energy|withered away|died|was poked to death|was killed by).+)$`,
+	`^` + logPrefix + `([A-Za-z0-9_.]{1,16}) ((?:was slain|was shot|was killed|was fireballed|was pummeled|was squished|was squashed|drowned|blew up|was blown up|was burnt|went up in flames|walked into fire|burned to death|tried to swim in lava|suffocated in a wall|starved to death|fell from|fell off|fell out of|hit the ground|was doomed to fall|was struck by lightning|froze to death|was impaled|was stung to death|was obliterated|discovered the floor was lava|didn't want to live|experienced kinetic energy|withered away|died|was poked to death|was killed by).+)$`,
 )
 
 // advancementRegex matches advancement/achievement messages:
@@ -49,7 +65,7 @@ var deathRegex = regexp.MustCompile(
 //	[HH:MM:SS] [Server thread/INFO]: PlayerName has completed the challenge [Challenge Name]
 //	[HH:MM:SS] [Server thread/INFO]: PlayerName has reached the goal [Goal Name]
 var advancementRegex = regexp.MustCompile(
-	`^\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) ([A-Za-z0-9_.]{1,16}) (has (?:made the advancement|completed the challenge|reached the goal) \[.+\])$`,
+	`^` + logPrefix + `([A-Za-z0-9_.]{1,16}) (has (?:made the advancement|completed the challenge|reached the goal) \[.+\])$`,
 )
 
 // EventType indicates which type of event a ChatLine represents.
@@ -198,8 +214,26 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 			lastHeartbeat = time.Now()
 		}
 
-		// Strip ANSI color codes before matching
+		// Normalise the raw scanner output into something the regexes can
+		// match reliably, regardless of how the MC container's console is
+		// configured:
+		//
+		// 1. Strip ANSI color codes and CSI sequences (\x1b[...m, \x1b[K).
+		// 2. Handle JLine-style interactive consoles (Paper/Spigot with the
+		//    "> " prompt): those write the prompt, then on every new log
+		//    line emit "\r<CSI>K<actual text>" so the terminal erases the
+		//    prompt before rendering the line. bufio.Scanner reads bytes
+		//    without simulating terminal rendering, so we get the prompt as
+		//    a prefix followed by \r and the real text. Dropping everything
+		//    up to the last \r mimics the terminal.
+		// 3. Trim leading/trailing whitespace so stray spaces or tabs don't
+		//    break the "^\[" anchor on the regexes.
 		line := ansiRegex.ReplaceAllString(scanner.Text(), "")
+		if idx := strings.LastIndex(line, "\r"); idx >= 0 {
+			line = line[idx+1:]
+		}
+		line = strings.TrimSpace(line)
+
 		var cl *ChatLine
 
 		if m := chatRegex.FindStringSubmatch(line); m != nil {
