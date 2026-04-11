@@ -90,14 +90,29 @@ func NewLogTailer(docker *dockerclient.Client, containerName string,
 // Runs until ctx is cancelled. Has internal retry logic.
 // Always call in a goroutine.
 func (t *LogTailer) Start(ctx context.Context, lineCh chan<- ChatLine) {
+	t.log.Info().Msg("LogTailer goroutine starting")
+	defer t.log.Info().Msg("LogTailer goroutine stopped")
+
 	backoff := 2 * time.Second
+	iteration := 0
 	for {
+		iteration++
+		t.log.Info().Int("iteration", iteration).
+			Msg("LogTailer.tail() entering")
 		if err := t.tail(ctx, lineCh); err != nil {
 			if ctx.Err() != nil {
+				t.log.Info().Err(ctx.Err()).
+					Msg("LogTailer ctx cancelled, exiting")
 				return
 			}
 			t.log.Warn().Err(err).Dur("retry_in", backoff).
 				Msg("Log tailing failed, retrying")
+		} else if ctx.Err() != nil {
+			t.log.Info().Msg("LogTailer ctx cancelled during tail, exiting")
+			return
+		} else {
+			t.log.Warn().Dur("retry_in", backoff).
+				Msg("LogTailer.tail() returned with no error (stream ended?), retrying")
 		}
 		select {
 		case <-ctx.Done():
@@ -111,6 +126,7 @@ func (t *LogTailer) Start(ctx context.Context, lineCh chan<- ChatLine) {
 }
 
 func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
+	t.log.Info().Msg("Opening Docker log stream")
 	reader, err := t.docker.ContainerLogs(ctx, t.containerName,
 		container.LogsOptions{
 			ShowStdout: true,
@@ -119,6 +135,7 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 			Tail:       "0",
 		})
 	if err != nil {
+		t.log.Warn().Err(err).Msg("ContainerLogs failed")
 		return err
 	}
 	defer reader.Close()
@@ -127,7 +144,14 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 	// raw output without multiplexing headers, so stdcopy must be skipped.
 	var logReader io.Reader
 	info, inspectErr := t.docker.ContainerInspect(ctx, t.containerName)
-	if inspectErr != nil || !info.Config.Tty {
+	tty := false
+	if inspectErr == nil {
+		tty = info.Config.Tty
+	}
+	t.log.Info().Bool("tty", tty).Err(inspectErr).
+		Msg("Docker container TTY mode detected")
+
+	if !tty {
 		// Non-TTY: Docker multiplexes stdout/stderr with 8-byte binary headers.
 		pr, pw := io.Pipe()
 		var wg sync.WaitGroup
@@ -149,7 +173,31 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 	}
 
 	scanner := bufio.NewScanner(logReader)
+	// Increase buffer size for long log lines (default is 64KB which is
+	// usually fine, but some MC servers output long advancement JSON).
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var linesRead, linesMatched int
+	lastHeartbeat := time.Now()
+	t.log.Info().Msg("Starting log line scanner loop")
 	for scanner.Scan() {
+		linesRead++
+		// Log the first few raw lines at INFO so we can confirm Docker is
+		// actually streaming something, regardless of regex matching.
+		if linesRead <= 3 {
+			t.log.Info().Int("line_num", linesRead).
+				Str("raw_line", scanner.Text()).
+				Msg("LogTailer read raw Docker line")
+		}
+		// Periodic heartbeat so silent periods are visible.
+		if time.Since(lastHeartbeat) > 2*time.Minute {
+			t.log.Info().
+				Int("lines_read", linesRead).
+				Int("lines_matched", linesMatched).
+				Msg("LogTailer heartbeat")
+			lastHeartbeat = time.Now()
+		}
+
 		// Strip ANSI color codes before matching
 		line := ansiRegex.ReplaceAllString(scanner.Text(), "")
 		var cl *ChatLine
@@ -185,22 +233,30 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 		}
 
 		if cl != nil {
+			linesMatched++
 			cl.Timestamp = time.Now()
 			cl.ContainerName = t.containerName
-			t.log.Trace().
+			t.log.Info().
 				Str("player", cl.PlayerName).
 				Int("event", int(cl.Event)).
 				Str("message", cl.Message).
-				Msg("Matched log line")
+				Msg("LogTailer matched line")
 			select {
 			case lineCh <- *cl:
 			case <-ctx.Done():
+				t.log.Info().Msg("ctx cancelled while queuing matched line")
 				return nil
 			}
 		} else if len(line) > 0 {
-			t.log.Trace().Str("line", line).Msg("Unmatched log line")
+			t.log.Debug().Str("line", line).Msg("Unmatched log line")
 		}
 	}
 
-	return scanner.Err()
+	scanErr := scanner.Err()
+	t.log.Info().
+		Int("lines_read", linesRead).
+		Int("lines_matched", linesMatched).
+		Err(scanErr).
+		Msg("LogTailer scanner loop exited")
+	return scanErr
 }
