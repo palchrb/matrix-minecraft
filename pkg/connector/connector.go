@@ -115,11 +115,20 @@ func (mc *MCConnector) restoreOnRestart(ctx context.Context) {
 		for _, login := range user.GetUserLogins() {
 			if strings.HasPrefix(string(login.ID), "admin:") {
 				mc.log.Info().Msg("Admin login found, restoring server connections")
+				// Ensure the shared space room exists on the admin login before
+				// SyncAll runs, so any migration of pre-existing server logins
+				// has a target space to move their portals into.
+				if _, err := login.GetSpaceRoom(ctx); err != nil {
+					mc.log.Warn().Err(err).
+						Msg("Failed to ensure shared space on restore")
+				}
 				if err := mc.provisioner.SyncAll(ctx, login); err != nil {
 					mc.log.Error().Err(err).Msg("Restore SyncAll failed")
 				}
 				go mc.provisioner.WatchEvents(ctx, login)
-				// Update space avatar only for admin logins (server logins share the same space)
+				// Update the shared-space avatar. All server logins are
+				// migrated to share this admin-owned space, so updating it
+				// once here is enough.
 				mc.updateSpaceAvatar(ctx, login)
 			}
 		}
