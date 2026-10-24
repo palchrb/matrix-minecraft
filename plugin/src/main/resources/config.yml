@@ -1,0 +1,16 @@
+# matrix-minecraft companion plugin.
+#
+# The bridge connects to http://<container-name>:<port>/events inside the
+# Docker network. Do not publish this port to the internet.
+
+# Address and port to listen on. The MC_BRIDGE_PORT environment variable
+# overrides the port.
+bind: 0.0.0.0
+port: 25580
+
+# Shared secret the bridge must send as "Authorization: Bearer <token>".
+# Leave empty to use the MC_BRIDGE_TOKEN environment variable, then
+# RCON_PASSWORD, then rcon.password from server.properties. The bridge
+# reads the same values from the container, so normally nothing needs to
+# be set here.
+token: ""

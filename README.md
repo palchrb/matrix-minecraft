@@ -8,6 +8,7 @@ A Matrix-Minecraft bridge built on [mautrix-go](https://github.com/mautrix/go) b
 - **Bidirectional chat** – Messages flow between Matrix and Minecraft via RCON (`tellraw`)
 - **Auto-discovery** – Finds Minecraft containers by Docker labels, no manual per-server config needed
 - **Game events** – Bridges join/leave, death messages, and advancements (configurable)
+- **Companion plugin (optional, recommended)** – Gets events straight from the server API instead of scraping the console; falls back to log tailing without it
 - **Player avatars** – Fetches Minecraft skins from [Starlight Skins API](https://starlightskins.lunareclipse.studio/) for ghost users
 - **Portal avatars** – Set a custom room avatar per server via Docker label
 - **Docker event watcher** – Automatically connects/disconnects when containers start/stop
@@ -183,16 +184,41 @@ The label prefix (`mc-bridge`) is configurable via `label_prefix` in the network
 | `mc-bridge.name` | No | Display name for the Matrix room (defaults to container name) |
 | `mc-bridge.avatar` | No | `mxc://` URI for the room avatar |
 | `mc-bridge.rcon-port` | No | RCON port if non-standard (default: 25575) |
+| `mc-bridge.events-port` | No | Companion plugin port if non-standard (default: 25580) |
+| `mc-bridge.source` | No | `auto` (default: plugin if reachable, else log tailing), `plugin` or `log` |
 
 The bridge reads `RCON_PASSWORD` from the container's environment variables automatically. Containers without `RCON_PASSWORD` set are skipped.
 
-### 7. Start the bridge
+### 7. Install the companion plugin (recommended)
+
+Without the plugin, the bridge reads events by parsing the server console, which breaks whenever a server update changes the log format. The companion plugin sends chat, join/leave, death and advancement events straight from the server API. It works on Spigot, Paper and Paper forks.
+
+With `itzg/minecraft-server`, add the plugin URL to `PLUGINS` and the image downloads it on startup:
+
+```yaml
+    environment:
+      PLUGINS: |
+        https://github.com/palchrb/matrix-minecraft/releases/download/plugin-latest/matrix-minecraft-bridge.jar
+```
+
+No other setup is needed. The plugin listens on port `25580` inside the container and accepts the container's `RCON_PASSWORD` as its token, which the bridge already reads. On startup the bridge logs `Event source: companion plugin`, or `Companion plugin not reachable, event source: log tailing` if the plugin isn't there.
+
+Don't publish port `25580` to the host; the bridge reaches it over the Docker network, same as RCON.
+
+Optional overrides (set them on the Minecraft container, both sides read them):
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `MC_BRIDGE_PORT` | `25580` | Port of the plugin's event stream |
+| `MC_BRIDGE_TOKEN` | `RCON_PASSWORD` | Shared secret between plugin and bridge |
+
+### 8. Start the bridge
 
 ```bash
 docker compose up -d matrix-minecraft
 ```
 
-### 8. Log in via Matrix
+### 9. Log in via Matrix
 
 Send a message to the bridge bot (`@minecraftbot:example.com`) or use the `login` flow in your Matrix client (Element, etc.):
 
@@ -217,6 +243,9 @@ network:
     # Default RCON port
     default_rcon_port: 25575
 
+    # Default companion plugin port
+    default_events_port: 25580
+
     # Tellraw message formatting colors
     prefix_text: "[Matrix]"
     prefix_color: light_purple
@@ -236,7 +265,7 @@ network:
 ## How It Works
 
 1. **Discovery** – On login (and on container start events), the bridge scans Docker for containers with `mc-bridge.enable=true`
-2. **Log tailing** – For each server, it attaches to the container's stdout via the Docker API and parses Minecraft log lines with regex
+2. **Events** – For each server, the bridge subscribes to the companion plugin's event stream (`http://<container>:25580/events`, Server-Sent Events with automatic reconnect and replay of missed events). If the plugin isn't installed, it attaches to the container's stdout via the Docker API and parses Minecraft log lines with regex instead
 3. **RCON** – Matrix-to-Minecraft messages are sent via RCON `tellraw` commands with formatted JSON
 4. **Avatars** – When a Minecraft player first sends a message, their skin is fetched from the Starlight Skins API and set as their ghost user's avatar (cached with ETag, refreshed hourly)
 5. **Auto-reconnect** – Docker events (start/stop/die) trigger automatic provisioning or disconnection
@@ -247,6 +276,12 @@ network:
 git clone https://github.com/palchrb/matrix-minecraft.git
 cd matrix-minecraft
 ./build.sh
+```
+
+Build the companion plugin (needs Java 17+ and Maven):
+
+```bash
+mvn -f plugin/pom.xml package   # → plugin/target/matrix-minecraft-bridge.jar
 ```
 
 Or build the Docker image:
@@ -287,6 +322,8 @@ Make sure your Minecraft server containers are on the same network so the bridge
 - **RCON connection failures** – Ensure RCON is enabled (`RCON_ENABLE=true`) and the bridge can reach the container on the Docker network
 - **No containers found** – Check that `mc-bridge.enable=true` label is set and the container is running
 - **Avatar fetch errors** – The Starlight Skins API requires valid Minecraft usernames; check `avatar_api_url` in config
+- **Join/chat events stopped showing up after a server update** – The console log format changed. Install the companion plugin (step 7). The log tailer also logs a `WRN` "log format may have changed" when it sees an event-like line it can't parse
+- **Plugin not detected** – Check the server log for `[MatrixMinecraftBridge] Streaming game events`, and that `MC_BRIDGE_TOKEN`/`RCON_PASSWORD` match on both sides
 - **Double usernames in chat** – Configure relay `message_formats` to use only `{{ .Message }}` (see Relay Mode above)
 
 ## License

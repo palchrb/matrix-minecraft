@@ -106,6 +106,11 @@ type ChatLine struct {
 	Timestamp     time.Time
 	ContainerName string
 	Event         EventType
+
+	// FullText, if set, is the complete event text to show instead of
+	// "<PlayerName> <Message>", e.g. a custom join message from a plugin
+	// that doesn't start with the player name.
+	FullText string
 }
 
 type LogTailer struct {

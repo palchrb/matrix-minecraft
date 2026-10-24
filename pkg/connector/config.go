@@ -17,6 +17,9 @@ type Config struct {
 	// RCON default settings
 	DefaultRCONPort int `yaml:"default_rcon_port"` // 25575
 
+	// Default port of the companion plugin's event stream
+	DefaultEventsPort int `yaml:"default_events_port"` // 25580
+
 	// Message formatting in Minecraft (tellraw colors)
 	PrefixText   string `yaml:"prefix_text"`   // [Matrix]
 	PrefixColor  string `yaml:"prefix_color"`  // light_purple
@@ -38,6 +41,7 @@ func upgradeConfig(helper configupgrade.Helper) {
 	helper.Copy(configupgrade.Str, "docker_host")
 	helper.Copy(configupgrade.Str, "label_prefix")
 	helper.Copy(configupgrade.Int, "default_rcon_port")
+	helper.Copy(configupgrade.Int, "default_events_port")
 	helper.Copy(configupgrade.Str, "prefix_text")
 	helper.Copy(configupgrade.Str, "prefix_color")
 	helper.Copy(configupgrade.Str, "sender_color")
