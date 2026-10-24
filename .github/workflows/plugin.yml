@@ -34,7 +34,7 @@ jobs:
       - name: Build plugin
         run: mvn -B -f plugin/pom.xml package
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         with:
           name: matrix-minecraft-bridge
           path: plugin/target/matrix-minecraft-bridge.jar
