@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -30,8 +31,7 @@ type mcServer struct {
 	displayName   string
 	avatarMXC     string
 
-	rcon      *RCONClient
-	logTailer *LogTailer
+	rcon *RCONClient
 
 	lineCh chan ChatLine
 
@@ -52,6 +52,10 @@ type MCClient struct {
 
 	servers   map[string]*mcServer
 	serversMu sync.Mutex
+
+	// msgSeq keeps remote message IDs unique when two events share a
+	// timestamp (the plugin reports millisecond precision).
+	msgSeq atomic.Uint64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -428,6 +432,24 @@ func (c *MCClient) discoverAll(ctx context.Context) error {
 			fmt.Sscanf(portStr, "%d", &rconPort)
 		}
 
+		// The companion plugin reads the same env vars, so by default both
+		// sides agree on port and token without extra configuration.
+		eventsPort := c.Connector.Config.DefaultEventsPort
+		if eventsPort == 0 {
+			eventsPort = 25580
+		}
+		if portStr := extractEnv(info.Config.Env, "MC_BRIDGE_PORT"); portStr != "" {
+			fmt.Sscanf(portStr, "%d", &eventsPort)
+		}
+		if portStr, ok := ct.Labels[labelPrefix+".events-port"]; ok {
+			fmt.Sscanf(portStr, "%d", &eventsPort)
+		}
+		eventsToken := extractEnv(info.Config.Env, "MC_BRIDGE_TOKEN")
+		if eventsToken == "" {
+			eventsToken = rconPassword
+		}
+		sourceMode := strings.ToLower(ct.Labels[labelPrefix+".source"])
+
 		if err := c.startServer(ctx, mcServerParams{
 			ContainerID:   ct.ID,
 			ContainerName: name,
@@ -436,6 +458,9 @@ func (c *MCClient) discoverAll(ctx context.Context) error {
 			RCONHost:      name,
 			RCONPort:      rconPort,
 			RCONPassword:  rconPassword,
+			EventsPort:    eventsPort,
+			EventsToken:   eventsToken,
+			SourceMode:    sourceMode,
 		}); err != nil {
 			c.log.Error().Err(err).Str("container", name).
 				Msg("Failed to start server")
@@ -466,6 +491,13 @@ type mcServerParams struct {
 	RCONHost      string
 	RCONPort      int
 	RCONPassword  string
+
+	// Companion plugin event stream.
+	EventsPort  int
+	EventsToken string
+	// SourceMode is "plugin", "log" or "auto"/"" (plugin if reachable,
+	// otherwise log tailing).
+	SourceMode string
 }
 
 // startServer adds a new mcServer to the internal map, connects RCON, starts
@@ -511,9 +543,8 @@ func (c *MCClient) startServer(ctx context.Context, p mcServerParams) error {
 		avatarMXC:     p.AvatarMXC,
 		rcon: NewRCONClient(p.RCONHost, p.RCONPort, p.RCONPassword,
 			c.Connector.Config, c.log),
-		logTailer: NewLogTailer(c.Connector.docker, p.ContainerName, c.log),
-		lineCh:    make(chan ChatLine, 64),
-		cancel:    srvCancel,
+		lineCh: make(chan ChatLine, 64),
+		cancel: srvCancel,
 	}
 	c.servers[p.ContainerName] = srv
 	c.serversMu.Unlock()
@@ -529,7 +560,12 @@ func (c *MCClient) startServer(ctx context.Context, p mcServerParams) error {
 		// Keep the server tracked anyway so we retry on the next event.
 	}
 
-	go srv.logTailer.Start(srvCtx, srv.lineCh)
+	go func() {
+		src := c.chooseEventSource(srvCtx, p)
+		if src != nil {
+			src.Start(srvCtx, srv.lineCh)
+		}
+	}()
 	go c.receiveLoop(srvCtx, srv)
 
 	// Ensure the Matrix portal exists for this container and that the admin
@@ -578,6 +614,43 @@ func (c *MCClient) startServer(ctx context.Context, p mcServerParams) error {
 	}
 
 	return nil
+}
+
+// chooseEventSource picks where a server's game events come from. The
+// companion plugin is preferred because it reads events from the server API
+// instead of scraping console output; log tailing is the fallback for
+// servers without it. Returns nil only if ctx is cancelled while probing.
+func (c *MCClient) chooseEventSource(ctx context.Context, p mcServerParams) eventSource {
+	log := c.log.With().Str("container", p.ContainerName).Logger()
+	plugin := NewPluginStream(p.RCONHost, p.EventsPort, p.EventsToken, p.ContainerName, c.log)
+	logTailer := NewLogTailer(c.Connector.docker, p.ContainerName, c.log)
+
+	switch p.SourceMode {
+	case "plugin":
+		log.Info().Msg("Event source: plugin (forced by label)")
+		return plugin
+	case "log":
+		log.Info().Msg("Event source: log tailing (forced by label)")
+		return logTailer
+	}
+
+	// The server may still be enabling plugins right after a container
+	// start, so give it a few tries before falling back.
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err = plugin.Probe(ctx); err == nil {
+			log.Info().Int("port", p.EventsPort).Msg("Event source: companion plugin")
+			return plugin
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(3 * time.Second):
+		}
+	}
+	log.Info().Err(err).Int("port", p.EventsPort).
+		Msg("Companion plugin not reachable, event source: log tailing")
+	return logTailer
 }
 
 // updatePortalInfo pushes a fresh ChatInfo into the portal for a running
@@ -749,25 +822,30 @@ func (c *MCClient) handleChatLine(line ChatLine) {
 			Timestamp:    line.Timestamp,
 		},
 		Data: line,
-		ID:   networkid.MessageID(fmt.Sprintf("mc-%s-%d", line.PlayerName, line.Timestamp.UnixNano())),
+		ID: networkid.MessageID(fmt.Sprintf("mc-%s-%d-%d",
+			line.PlayerName, line.Timestamp.UnixNano(), c.msgSeq.Add(1))),
 		ConvertMessageFunc: func(ctx context.Context, portal *bridgev2.Portal,
 			intent bridgev2.MatrixAPI, data ChatLine) (*bridgev2.ConvertedMessage, error) {
 			msgType := event.MsgText
 			body := data.Message
+			text := data.PlayerName + " " + data.Message
+			if data.FullText != "" {
+				text = data.FullText
+			}
 
 			switch data.Event {
 			case EventJoin:
 				msgType = event.MsgNotice
-				body = "☑ " + data.PlayerName + " " + data.Message
+				body = "☑ " + text
 			case EventLeave:
 				msgType = event.MsgNotice
-				body = "☐ " + data.PlayerName + " " + data.Message
+				body = "☐ " + text
 			case EventDeath:
 				msgType = event.MsgNotice
-				body = "☠ " + data.PlayerName + " " + data.Message
+				body = "☠ " + text
 			case EventAdvancement:
 				msgType = event.MsgNotice
-				body = "🏆 " + data.PlayerName + " " + data.Message
+				body = "🏆 " + text
 			}
 
 			return &bridgev2.ConvertedMessage{

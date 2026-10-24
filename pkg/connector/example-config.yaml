@@ -7,6 +7,11 @@ label_prefix: mc-bridge
 # Default RCON port if not overridden via mc-bridge.rcon-port label
 default_rcon_port: 25575
 
+# Default port of the companion plugin's event stream, if not overridden via
+# the mc-bridge.events-port label or MC_BRIDGE_PORT in the container env.
+# Servers without the plugin fall back to log tailing automatically.
+default_events_port: 25580
+
 # Message formatting in Minecraft (tellraw JSON colors)
 prefix_text: "[Matrix]"
 prefix_color: light_purple

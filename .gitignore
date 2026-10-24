@@ -9,3 +9,4 @@ mc-bridge
 .idea/
 .vscode/
 *.swp
+plugin/target/
