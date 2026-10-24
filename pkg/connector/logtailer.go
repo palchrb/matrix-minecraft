@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/pkg/stdcopy"
 	dockerclient "github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/rs/zerolog"
 )
 
@@ -25,48 +25,69 @@ var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07`)
 //   - Vanilla:   [HH:MM:SS] [Server thread/INFO]:
 //   - Paper:     [HH:MM:SS INFO]:
 //   - Paper with extra fields: [HH:MM:SS INFO] [PluginName]:
+//
 // The [^\]]* inside the timestamp bracket tolerates "[16:31:38 INFO]" as
 // well as "[16:31:38]".
 const logPrefix = `\[\d{2}:\d{2}:\d{2}[^\]]*\](?::| \[[^\]]+\]:) `
+
+// logPrefixRegex captures the message body after the timestamp + thread tag.
+var logPrefixRegex = regexp.MustCompile(`^` + logPrefix + `(.*)$`)
+
+// sourcePrefixRegex matches an optional "<Source> chat: " marker that some
+// server builds put in front of broadcast messages, e.g. recent Paper logs
+// join/leave as "System chat: .palchrb joined the game". It's stripped before
+// the event regexes run so a new marker of the same shape doesn't silently
+// break bridging again.
+var sourcePrefixRegex = regexp.MustCompile(`^[A-Za-z]+ chat: `)
 
 // chatPrefix matches zero or more bracketed prefixes before the "<player>"
 // token. Covers plain chat, "[Not Secure]" marker, and rank plugins like
 // [Admin] or [VIP] [Staff] <player>.
 const chatPrefix = `(?:\[[^\]]+\] )*`
 
-// chatRegex matches Minecraft server chat lines in various log formats:
-//   - Vanilla:    [HH:MM:SS] [Server thread/INFO]: <PlayerName> message
-//   - Paper/etc:  [HH:MM:SS INFO]: <PlayerName> message
-//   - Not Secure: [HH:MM:SS INFO]: [Not Secure] <PlayerName> message
-//   - Rank plugins: [HH:MM:SS INFO]: [Admin] <PlayerName> message
-//   - Floodgate:  player names may start with '.' (e.g. .palchrb)
-var chatRegex = regexp.MustCompile(
-	`^` + logPrefix + chatPrefix + `<([A-Za-z0-9_.]{1,16})> (.+)$`,
-)
+// playerName matches Java names and Floodgate/Bedrock names (prefixed with '.').
+const playerName = `([A-Za-z0-9_.]{1,16})`
+
+// The event regexes below run on the message body, i.e. after the log
+// prefix and any source marker have been stripped:
+//
+//	<PlayerName> message
+//	[Not Secure] <PlayerName> message
+//	[Admin] <PlayerName> message
+var chatRegex = regexp.MustCompile(`^` + chatPrefix + `<` + playerName + `> (.+)$`)
 
 // joinLeaveRegex matches vanilla join/leave messages:
 //
-//	[HH:MM:SS] [Server thread/INFO]: PlayerName joined the game
-//	[HH:MM:SS] [Server thread/INFO]: PlayerName left the game
-var joinLeaveRegex = regexp.MustCompile(
-	`^` + logPrefix + `([A-Za-z0-9_.]{1,16}) (joined the game|left the game)$`,
-)
+//	PlayerName joined the game
+//	PlayerName left the game
+var joinLeaveRegex = regexp.MustCompile(`^` + playerName + ` (joined the game|left the game)$`)
 
 // deathRegex matches death messages. Minecraft death messages always start with the player name
 // followed by a death message verb (was slain, was shot, drowned, fell, etc.)
 // Captures: [1] player name, [2] full death message after player name
 var deathRegex = regexp.MustCompile(
-	`^` + logPrefix + `([A-Za-z0-9_.]{1,16}) ((?:was slain|was shot|was killed|was fireballed|was pummeled|was squished|was squashed|drowned|blew up|was blown up|was burnt|went up in flames|walked into fire|burned to death|tried to swim in lava|suffocated in a wall|starved to death|fell from|fell off|fell out of|hit the ground|was doomed to fall|was struck by lightning|froze to death|was impaled|was stung to death|was obliterated|discovered the floor was lava|didn't want to live|experienced kinetic energy|withered away|died|was poked to death|was killed by).+)$`,
+	`^` + playerName + ` ((?:was slain|was shot|was killed|was fireballed|was pummeled|was squished|was squashed|drowned|blew up|was blown up|was burnt|went up in flames|walked into fire|burned to death|tried to swim in lava|suffocated in a wall|starved to death|fell from|fell off|fell out of|hit the ground|was doomed to fall|was struck by lightning|froze to death|was impaled|was stung to death|was obliterated|discovered the floor was lava|didn't want to live|experienced kinetic energy|withered away|died|was poked to death|was killed by).+)$`,
 )
 
 // advancementRegex matches advancement/achievement messages:
 //
-//	[HH:MM:SS] [Server thread/INFO]: PlayerName has made the advancement [Advancement Name]
-//	[HH:MM:SS] [Server thread/INFO]: PlayerName has completed the challenge [Challenge Name]
-//	[HH:MM:SS] [Server thread/INFO]: PlayerName has reached the goal [Goal Name]
+//	PlayerName has made the advancement [Advancement Name]
+//	PlayerName has completed the challenge [Challenge Name]
+//	PlayerName has reached the goal [Goal Name]
 var advancementRegex = regexp.MustCompile(
-	`^` + logPrefix + `([A-Za-z0-9_.]{1,16}) (has (?:made the advancement|completed the challenge|reached the goal) \[.+\])$`,
+	`^` + playerName + ` (has (?:made the advancement|completed the challenge|reached the goal) \[.+\])$`,
 )
+
+// eventHints are substrings that almost certainly mean a line is a game
+// event. If a line contains one but no regex matched, the log format has
+// probably changed and we warn loudly instead of hiding it at debug level.
+var eventHints = []string{
+	"joined the game",
+	"left the game",
+	"has made the advancement",
+	"has completed the challenge",
+	"has reached the goal",
+}
 
 // EventType indicates which type of event a ChatLine represents.
 type EventType int
@@ -214,58 +235,7 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 			lastHeartbeat = time.Now()
 		}
 
-		// Normalise the raw scanner output into something the regexes can
-		// match reliably, regardless of how the MC container's console is
-		// configured:
-		//
-		// 1. Strip ANSI color codes and CSI sequences (\x1b[...m, \x1b[K).
-		// 2. Handle JLine-style interactive consoles (Paper/Spigot with the
-		//    "> " prompt): those write the prompt, then on every new log
-		//    line emit "\r<CSI>K<actual text>" so the terminal erases the
-		//    prompt before rendering the line. bufio.Scanner reads bytes
-		//    without simulating terminal rendering, so we get the prompt as
-		//    a prefix followed by \r and the real text. Dropping everything
-		//    up to the last \r mimics the terminal.
-		// 3. Trim leading/trailing whitespace so stray spaces or tabs don't
-		//    break the "^\[" anchor on the regexes.
-		line := ansiRegex.ReplaceAllString(scanner.Text(), "")
-		if idx := strings.LastIndex(line, "\r"); idx >= 0 {
-			line = line[idx+1:]
-		}
-		line = strings.TrimSpace(line)
-
-		var cl *ChatLine
-
-		if m := chatRegex.FindStringSubmatch(line); m != nil {
-			cl = &ChatLine{
-				PlayerName: m[1],
-				Message:    m[2],
-				Event:      EventChat,
-			}
-		} else if m := joinLeaveRegex.FindStringSubmatch(line); m != nil {
-			evt := EventJoin
-			if m[2] == "left the game" {
-				evt = EventLeave
-			}
-			cl = &ChatLine{
-				PlayerName: m[1],
-				Message:    m[2],
-				Event:      evt,
-			}
-		} else if m := deathRegex.FindStringSubmatch(line); m != nil {
-			cl = &ChatLine{
-				PlayerName: m[1],
-				Message:    m[2],
-				Event:      EventDeath,
-			}
-		} else if m := advancementRegex.FindStringSubmatch(line); m != nil {
-			cl = &ChatLine{
-				PlayerName: m[1],
-				Message:    m[2],
-				Event:      EventAdvancement,
-			}
-		}
-
+		cl, line := parseLine(scanner.Text())
 		if cl != nil {
 			linesMatched++
 			cl.Timestamp = time.Now()
@@ -281,7 +251,10 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 				t.log.Info().Msg("ctx cancelled while queuing matched line")
 				return nil
 			}
-		} else if len(line) > 0 {
+		} else if line != "" && looksLikeEvent(line) {
+			t.log.Warn().Str("line", line).
+				Msg("Line looks like a game event but no pattern matched; log format may have changed")
+		} else if line != "" {
 			t.log.Debug().Str("line", line).Msg("Unmatched log line")
 		}
 	}
@@ -293,4 +266,64 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 		Err(scanErr).
 		Msg("LogTailer scanner loop exited")
 	return scanErr
+}
+
+// normaliseLine turns raw scanner output into something the regexes can
+// match reliably, regardless of how the MC container's console is
+// configured:
+//
+//  1. Strip ANSI color codes and CSI sequences (\x1b[...m, \x1b[K).
+//  2. Handle JLine-style interactive consoles (Paper/Spigot with the
+//     "> " prompt): those write the prompt, then on every new log
+//     line emit "\r<CSI>K<actual text>" so the terminal erases the
+//     prompt before rendering the line. bufio.Scanner reads bytes
+//     without simulating terminal rendering, so we get the prompt as
+//     a prefix followed by \r and the real text. Dropping everything
+//     up to the last \r mimics the terminal.
+//  3. Trim leading/trailing whitespace so stray spaces or tabs don't
+//     break the "^\[" anchor on the regexes.
+func normaliseLine(raw string) string {
+	line := ansiRegex.ReplaceAllString(raw, "")
+	if idx := strings.LastIndex(line, "\r"); idx >= 0 {
+		line = line[idx+1:]
+	}
+	return strings.TrimSpace(line)
+}
+
+// parseLine parses one raw log line. It returns the matched event (nil if
+// the line isn't a bridged event) and the normalised line for logging.
+func parseLine(raw string) (*ChatLine, string) {
+	line := normaliseLine(raw)
+	m := logPrefixRegex.FindStringSubmatch(line)
+	if m == nil {
+		return nil, line
+	}
+	body := sourcePrefixRegex.ReplaceAllString(m[1], "")
+
+	if m := chatRegex.FindStringSubmatch(body); m != nil {
+		return &ChatLine{PlayerName: m[1], Message: m[2], Event: EventChat}, line
+	}
+	if m := joinLeaveRegex.FindStringSubmatch(body); m != nil {
+		evt := EventJoin
+		if m[2] == "left the game" {
+			evt = EventLeave
+		}
+		return &ChatLine{PlayerName: m[1], Message: m[2], Event: evt}, line
+	}
+	if m := deathRegex.FindStringSubmatch(body); m != nil {
+		return &ChatLine{PlayerName: m[1], Message: m[2], Event: EventDeath}, line
+	}
+	if m := advancementRegex.FindStringSubmatch(body); m != nil {
+		return &ChatLine{PlayerName: m[1], Message: m[2], Event: EventAdvancement}, line
+	}
+	return nil, line
+}
+
+func looksLikeEvent(line string) bool {
+	for _, h := range eventHints {
+		if strings.Contains(line, h) {
+			return true
+		}
+	}
+	return false
 }
