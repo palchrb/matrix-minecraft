@@ -19,8 +19,14 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// faceSize is the pixel size of the rendered avatar (8x8 face, scaled up).
-const faceSize = 128
+// Matrix clients show avatars cropped to a circle, so the face is drawn
+// smaller than the canvas with a transparent margin: an 88px face (8px
+// scaled 11x, keeping pixels crisp) has its corners 62px from the centre,
+// inside the 64px radius of a 128px avatar.
+const (
+	avatarSize = 128
+	faceScale  = 11
+)
 
 // AvatarFetcher produces avatar images for Minecraft players.
 //
@@ -214,7 +220,8 @@ func (f *AvatarFetcher) getJSON(ctx context.Context, u string, v any) error {
 }
 
 // renderFace crops the face (and hat overlay) out of a 64x64 or legacy
-// 64x32 skin and scales it up to faceSize with nearest-neighbour sampling.
+// 64x32 skin and scales it up with nearest-neighbour sampling, centred on a
+// transparent avatarSize canvas.
 func renderFace(skinPNG []byte) ([]byte, error) {
 	skin, err := png.Decode(bytes.NewReader(skinPNG))
 	if err != nil {
@@ -234,11 +241,11 @@ func renderFace(skinPNG []byte) ([]byte, error) {
 		draw.Draw(face, face.Bounds(), skin, hatOrigin, draw.Over)
 	}
 
-	out := image.NewNRGBA(image.Rect(0, 0, faceSize, faceSize))
-	scale := faceSize / 8
-	for y := 0; y < faceSize; y++ {
-		for x := 0; x < faceSize; x++ {
-			out.Set(x, y, face.At(x/scale, y/scale))
+	out := image.NewNRGBA(image.Rect(0, 0, avatarSize, avatarSize))
+	margin := (avatarSize - 8*faceScale) / 2
+	for y := 0; y < 8*faceScale; y++ {
+		for x := 0; x < 8*faceScale; x++ {
+			out.Set(margin+x, margin+y, face.At(x/faceScale, y/faceScale))
 		}
 	}
 	var buf bytes.Buffer
