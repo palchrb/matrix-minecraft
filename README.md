@@ -9,7 +9,7 @@ A Matrix-Minecraft bridge built on [mautrix-go](https://github.com/mautrix/go) b
 - **Auto-discovery** – Finds Minecraft containers by Docker labels, no manual per-server config needed
 - **Game events** – Bridges join/leave, death messages, and advancements (configurable)
 - **Companion plugin (optional, recommended)** – Gets events straight from the server API instead of scraping the console; falls back to log tailing without it
-- **Player avatars** – Fetches Minecraft skins from [Starlight Skins API](https://starlightskins.lunareclipse.studio/) for ghost users
+- **Player avatars** – Renders each ghost user's avatar from the player's skin (Mojang for Java, GeyserMC for Bedrock/Floodgate)
 - **Portal avatars** – Set a custom room avatar per server via Docker label
 - **Docker event watcher** – Automatically connects/disconnects when containers start/stop
 - **Relay mode** – Lets non-logged-in Matrix users chat through the bridge
@@ -255,8 +255,9 @@ network:
     # Provisioning secret (prefer PROVISIONING_SECRET env var)
     provisioning_secret: ""
 
-    # Avatar API URL (%s = MC username)
-    avatar_api_url: "https://starlightskins.lunareclipse.studio/render/default/%s/bust"
+    # Empty = render avatars from player skins (Mojang / GeyserMC).
+    # Or a render service URL (%s = MC username).
+    avatar_api_url: ""
 
     # Bridge all events (join/leave/death/advancement) or only chat
     bridge_all_events: true
@@ -267,7 +268,7 @@ network:
 1. **Discovery** – On login (and on container start events), the bridge scans Docker for containers with `mc-bridge.enable=true`
 2. **Events** – For each server, the bridge subscribes to the companion plugin's event stream (`http://<container>:25580/events`, Server-Sent Events with automatic reconnect and replay of missed events). If the plugin isn't installed, it attaches to the container's stdout via the Docker API and parses Minecraft log lines with regex instead
 3. **RCON** – Matrix-to-Minecraft messages are sent via RCON `tellraw` commands with formatted JSON
-4. **Avatars** – When a Minecraft player first sends a message, their skin is fetched from the Starlight Skins API and set as their ghost user's avatar (cached with ETag, refreshed hourly)
+4. **Avatars** – When a Minecraft player first sends a message, their skin is looked up via Mojang (Java) or GeyserMC (Bedrock), the face is rendered and set as their ghost user's avatar (re-checked hourly, re-uploaded only when the skin changes)
 5. **Auto-reconnect** – Docker events (start/stop/die) trigger automatic provisioning or disconnection
 
 ## Building from Source
@@ -321,7 +322,7 @@ Make sure your Minecraft server containers are on the same network so the bridge
 - **"No RCON_PASSWORD in container env"** – Set `RCON_PASSWORD` as an environment variable on your Minecraft container
 - **RCON connection failures** – Ensure RCON is enabled (`RCON_ENABLE=true`) and the bridge can reach the container on the Docker network
 - **No containers found** – Check that `mc-bridge.enable=true` label is set and the container is running
-- **Avatar fetch errors** – The Starlight Skins API requires valid Minecraft usernames; check `avatar_api_url` in config
+- **Avatar fetch errors** – Avatars are rendered from the player's skin via Mojang (Java) or GeyserMC (Bedrock); offline-mode names without a matching account get the default avatar. A Bedrock player's skin shows up once GeyserMC has seen them on a Geyser server
 - **Join/chat events stopped showing up after a server update** – The console log format changed. Install the companion plugin (step 7). The log tailer also logs a `WRN` "log format may have changed" when it sees an event-like line it can't parse
 - **Plugin not detected** – Check the server log for `[MatrixMinecraftBridge] Streaming game events`, and that `MC_BRIDGE_TOKEN`/`RCON_PASSWORD` match on both sides
 - **Double usernames in chat** – Configure relay `message_formats` to use only `{{ .Message }}` (see Relay Mode above)

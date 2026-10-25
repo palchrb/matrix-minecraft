@@ -201,7 +201,7 @@ func (p *PluginStream) dispatch(ctx context.Context, lineCh chan<- ChatLine, raw
 	p.log.Info().
 		Str("player", cl.PlayerName).
 		Int("event", int(cl.Event)).
-		Str("message", cl.Message).
+		Str("text", cl.Message).
 		Msg("Plugin event received")
 	select {
 	case lineCh <- cl:
