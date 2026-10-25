@@ -35,6 +35,7 @@ type mcServer struct {
 
 	lineCh chan ChatLine
 
+	ctx    context.Context
 	cancel context.CancelFunc
 }
 
@@ -92,6 +93,10 @@ func (c *MCClient) Connect(ctx context.Context) {
 	c.ctx = bgCtx
 	c.cancel = cancel
 
+	// Watch Docker events before the initial scan, so a container that is
+	// (re)created while we're scanning still gets picked up.
+	go c.watchDockerEvents(bgCtx)
+
 	if err := c.discoverAll(ctx); err != nil {
 		c.log.Error().Err(err).Msg("Initial Docker discovery failed")
 		c.UserLogin.BridgeState.Send(status.BridgeState{
@@ -108,8 +113,6 @@ func (c *MCClient) Connect(ctx context.Context) {
 	// hasn't been yet (very first Connect with no servers), updateSpaceAvatar
 	// silently no-ops and the correct avatar is used at creation time anyway.
 	c.Connector.updateSpaceAvatar(ctx, c.UserLogin)
-
-	go c.watchDockerEvents(bgCtx)
 
 	c.UserLogin.BridgeState.Send(status.BridgeState{
 		StateEvent: status.StateConnected,
@@ -534,10 +537,12 @@ func (c *MCClient) startServer(ctx context.Context, p mcServerParams) error {
 		if !existing.rcon.IsConnected() {
 			c.log.Info().Str("container", p.ContainerName).
 				Msg("RCON disconnected, reconnecting")
-			if err := existing.rcon.Connect(ctx); err != nil {
-				c.log.Warn().Err(err).Str("container", p.ContainerName).
-					Msg("RCON reconnect failed")
-			}
+			go func() {
+				if err := existing.rcon.Connect(existing.ctx); err != nil {
+					c.log.Warn().Err(err).Str("container", p.ContainerName).
+						Msg("RCON reconnect failed")
+				}
+			}()
 		}
 		return nil
 	}
@@ -553,6 +558,7 @@ func (c *MCClient) startServer(ctx context.Context, p mcServerParams) error {
 		rcon: NewRCONClient(p.RCONHost, p.RCONPort, p.RCONPassword,
 			c.Connector.Config, c.log),
 		lineCh: make(chan ChatLine, 64),
+		ctx:    srvCtx,
 		cancel: srvCancel,
 	}
 	c.servers[p.ContainerName] = srv
@@ -563,13 +569,16 @@ func (c *MCClient) startServer(ctx context.Context, p mcServerParams) error {
 		Str("display_name", p.DisplayName).
 		Msg("Starting server")
 
-	if err := srv.rcon.Connect(ctx); err != nil {
-		c.log.Warn().Err(err).Str("container", p.ContainerName).
-			Msg("RCON connection failed")
-		// Keep the server tracked anyway so we retry on the next event.
-	}
-
+	// Connect RCON in the background: a server that is still booting can
+	// take minutes, and blocking here would hold up discovery of every
+	// other container. The event source is chosen once RCON is up, since
+	// by then the server (and the companion plugin) has finished starting.
 	go func() {
+		if err := srv.rcon.Connect(srvCtx); err != nil {
+			c.log.Warn().Err(err).Str("container", p.ContainerName).
+				Msg("RCON connection failed")
+			// Keep the server tracked anyway; Matrix messages retry RCON.
+		}
 		src := c.chooseEventSource(srvCtx, p)
 		if src != nil {
 			src.Start(srvCtx, srv.lineCh)

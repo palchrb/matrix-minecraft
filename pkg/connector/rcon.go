@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorcon/rcon"
@@ -19,6 +20,7 @@ type RCONClient struct {
 	password     string
 	conn         *rcon.Conn
 	mu           sync.Mutex
+	connecting   atomic.Bool
 	log          zerolog.Logger
 	prefixText   string
 	prefixColor  string
@@ -41,7 +43,16 @@ func NewRCONClient(host string, port int, password string,
 }
 
 // Connect connects to RCON with exponential backoff (max 10 attempts).
+// Only one Connect runs at a time; a concurrent call returns an error
+// instead of opening a second connection.
 func (r *RCONClient) Connect(ctx context.Context) error {
+	if !r.connecting.CompareAndSwap(false, true) {
+		return fmt.Errorf("RCON connection already in progress")
+	}
+	defer r.connecting.Store(false)
+	if r.IsConnected() {
+		return nil
+	}
 	backoff := 2 * time.Second
 	addr := fmt.Sprintf("%s:%d", r.host, r.port)
 	for attempt := 1; attempt <= 10; attempt++ {
