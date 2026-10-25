@@ -31,10 +31,4 @@ fi
 cd /data
 fixperms
 
-# If docker socket exists, make it accessible to our unprivileged user.
-# su-exec does not set supplementary groups, so group_add alone is not enough.
-if [ -S /var/run/docker.sock ]; then
-	chown $UID /var/run/docker.sock
-fi
-
 exec su-exec $UID:$GID /usr/bin/matrix-minecraft

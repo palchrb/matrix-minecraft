@@ -2,5 +2,14 @@ name: MatrixMinecraftBridge
 version: '${project.version}'
 main: io.github.palchrb.matrixminecraft.BridgePlugin
 api-version: '1.20'
-description: Streams chat, join/leave, death and advancement events to matrix-minecraft
+description: Connects the server to matrix-minecraft (chat, join/leave, death and advancement events both ways)
 website: https://github.com/palchrb/matrix-minecraft
+commands:
+  matrixbridge:
+    description: Matrix bridge commands
+    usage: /matrixbridge token
+    permission: matrixbridge.admin
+permissions:
+  matrixbridge.admin:
+    description: Show the Matrix bridge token
+    default: op

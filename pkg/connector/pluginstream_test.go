@@ -2,11 +2,12 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,12 +17,7 @@ import (
 
 func newTestStream(t *testing.T, srv *httptest.Server, token string) *PluginStream {
 	t.Helper()
-	host, portStr, err := net.SplitHostPort(srv.Listener.Addr().String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	port, _ := strconv.Atoi(portStr)
-	p := NewPluginStream(host, port, token, "mc-test", zerolog.Nop())
+	p := NewPluginStream(srv.URL, token, "mc-test", zerolog.Nop())
 	p.minBackoff = 10 * time.Millisecond
 	p.maxBackoff = 20 * time.Millisecond
 	return p
@@ -83,8 +79,8 @@ func TestPluginStreamReconnectsWithLastEventID(t *testing.T) {
 	if !join.Timestamp.Equal(time.UnixMilli(1700000000000)) {
 		t.Fatalf("unexpected timestamp: %v", join.Timestamp)
 	}
-	if join.ContainerName != "mc-test" {
-		t.Fatalf("unexpected container: %q", join.ContainerName)
+	if join.ServerID != "mc-test" {
+		t.Fatalf("unexpected server: %q", join.ServerID)
 	}
 	chat := recv(t, ch)
 	if chat.Event != EventChat || chat.PlayerName != "Sverre" || chat.Message != "hei" {
@@ -141,15 +137,16 @@ func TestPluginProbe(t *testing.T) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		fmt.Fprint(w, `{"plugin":"matrix-minecraft-bridge"}`)
+		fmt.Fprint(w, `{"plugin":"matrix-minecraft-bridge","server":"Paper 26.1.2","motd":"hi"}`)
 	}))
 	defer srv.Close()
 
-	if err := newTestStream(t, srv, "secret").Probe(context.Background()); err != nil {
-		t.Fatalf("probe with right token failed: %v", err)
+	info, err := newTestStream(t, srv, "secret").Probe(context.Background())
+	if err != nil || info.Server != "Paper 26.1.2" {
+		t.Fatalf("probe with right token failed: %+v %v", info, err)
 	}
-	if err := newTestStream(t, srv, "wrong").Probe(context.Background()); err == nil {
-		t.Fatal("probe with wrong token should fail")
+	if _, err := newTestStream(t, srv, "wrong").Probe(context.Background()); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("probe with wrong token should be ErrUnauthorized, got %v", err)
 	}
 }
 
@@ -165,4 +162,103 @@ func TestPluginEventToChatLine(t *testing.T) {
 	if _, ok := (pluginEvent{Type: "weather", Player: "x", Message: "y"}).toChatLine(); ok {
 		t.Fatal("unknown type should be ignored")
 	}
+}
+
+func TestPluginProbeRejectsOtherServices(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"status":"ok"}`)
+	}))
+	defer srv.Close()
+	if _, err := newTestStream(t, srv, "secret").Probe(context.Background()); err == nil {
+		t.Fatal("a non-plugin service must not pass the probe")
+	}
+}
+
+func TestPluginSend(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/prefix/send" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Error(err)
+		}
+		if got["message"] == "fail" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"error":"server could not display the message"}`)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true}`)
+	}))
+	defer srv.Close()
+
+	// Base URLs with a path (reverse proxy) and a trailing slash must work.
+	p := NewPluginStream(srv.URL+"/prefix/", "secret", "mc-test", zerolog.Nop())
+	ctx := context.Background()
+	format := SendFormat{Prefix: "[Matrix]", SenderColor: "aqua"}
+	if err := p.Send(ctx, "Pål", "hei <3", format); err != nil {
+		t.Fatal(err)
+	}
+	if got["sender"] != "Pål" || got["message"] != "hei <3" {
+		t.Fatalf("unexpected body: %v", got)
+	}
+	if f, _ := got["format"].(map[string]any); f["prefix"] != "[Matrix]" || f["sender_color"] != "aqua" {
+		t.Fatalf("unexpected format: %v", got["format"])
+	}
+	if err := p.Send(ctx, "Pål", "fail", format); err == nil || !strings.Contains(err.Error(), "could not display") {
+		t.Fatalf("expected plugin error to be surfaced, got %v", err)
+	}
+	wrong := NewPluginStream(srv.URL+"/prefix", "wrong", "mc-test", zerolog.Nop())
+	if err := wrong.Send(ctx, "Pål", "hei", format); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+}
+
+func TestPluginStreamStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "id: b-1\ndata: {\"type\":\"chat\",\"player\":\"Sverre\",\"message\":\"hei\"}\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bad := newTestStream(t, srv, "wrong")
+	go bad.Start(ctx, make(chan ChatLine, 1))
+	waitFor(t, func() bool { return bad.Status().LastError != "" })
+	if st := bad.Status(); st.Connected || !strings.Contains(st.LastError, "rejected the token") {
+		t.Fatalf("unexpected status for wrong token: %+v", st)
+	}
+
+	good := newTestStream(t, srv, "secret")
+	ch := make(chan ChatLine, 1)
+	go good.Start(ctx, ch)
+	recv(t, ch)
+	if st := good.Status(); !st.Connected || st.LastEvent.IsZero() || st.LastError != "" {
+		t.Fatalf("unexpected status for good stream: %+v", st)
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met in time")
 }

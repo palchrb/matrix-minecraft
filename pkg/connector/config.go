@@ -10,16 +10,6 @@ import (
 var ExampleConfig string
 
 type Config struct {
-	// Docker settings
-	DockerHost  string `yaml:"docker_host"`  // unix:///var/run/docker.sock
-	LabelPrefix string `yaml:"label_prefix"` // mc-bridge
-
-	// RCON default settings
-	DefaultRCONPort int `yaml:"default_rcon_port"` // 25575
-
-	// Default port of the companion plugin's event stream
-	DefaultEventsPort int `yaml:"default_events_port"` // 25580
-
 	// Message formatting in Minecraft (tellraw colors)
 	PrefixText   string `yaml:"prefix_text"`   // [Matrix]
 	PrefixColor  string `yaml:"prefix_color"`  // light_purple
@@ -29,7 +19,8 @@ type Config struct {
 	// Provisioning — also read from PROVISIONING_SECRET env variable
 	ProvisioningSecret string `yaml:"provisioning_secret"`
 
-	// Avatar API URL (%s is replaced with MC username)
+	// Avatar render URL (%s is replaced with MC username). Empty renders
+	// avatars from player skins.
 	AvatarAPIURL string `yaml:"avatar_api_url"`
 
 	// Bridge all events (join/leave/death/advancement) in addition to chat.
@@ -38,10 +29,6 @@ type Config struct {
 }
 
 func upgradeConfig(helper configupgrade.Helper) {
-	helper.Copy(configupgrade.Str, "docker_host")
-	helper.Copy(configupgrade.Str, "label_prefix")
-	helper.Copy(configupgrade.Int, "default_rcon_port")
-	helper.Copy(configupgrade.Int, "default_events_port")
 	helper.Copy(configupgrade.Str, "prefix_text")
 	helper.Copy(configupgrade.Str, "prefix_color")
 	helper.Copy(configupgrade.Str, "sender_color")

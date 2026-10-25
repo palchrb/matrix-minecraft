@@ -1,26 +1,25 @@
 # matrix-minecraft
-Made a stupid and overengineered bridge between minecraft and matrix... Unelegantly based on tailing the log of an itzg docker run mc server, and sending replies via rcon. Would probably have been smarter just to use one of the existing bridges in the form of paper plugins, but i just wanted to have e2ee so then i made this one insted. Stupid and pointless? Yes..If you want to talk about it, feel free to reach out at [#whatever:vibb.me](https://matrix.to/#/%23whatever:vibb.me)
+Made a stupid and overengineered bridge between minecraft and matrix... It started out unelegantly tailing the log of an itzg docker run mc server and sending replies via rcon; these days it talks to a small companion plugin instead. Would probably have been smarter just to use one of the existing bridges in the form of paper plugins, but i just wanted to have e2ee so then i made this one insted. Stupid and pointless? Yes..If you want to talk about it, feel free to reach out at [#whatever:vibb.me](https://matrix.to/#/%23whatever:vibb.me)
 
-A Matrix-Minecraft bridge built on [mautrix-go](https://github.com/mautrix/go) bridgev2. It automatically discovers Minecraft server containers via Docker labels, bridges chat messages bidirectionally, and shows in-game events (joins, deaths, advancements) in your Matrix room.
+A Matrix-Minecraft bridge built on [mautrix-go](https://github.com/mautrix/go) bridgev2. A small companion plugin on each Minecraft server streams chat and game events (joins, deaths, advancements) to the bridge and shows Matrix messages in game. Servers are added from Matrix; the bridge needs no Docker socket and no RCON.
 
 ## Features
 
-- **Bidirectional chat** – Messages flow between Matrix and Minecraft via RCON (`tellraw`)
-- **Auto-discovery** – Finds Minecraft containers by Docker labels, no manual per-server config needed
+- **Bidirectional chat** – Matrix messages show up in game, in-game chat shows up in Matrix
 - **Game events** – Bridges join/leave, death messages, and advancements (configurable)
-- **Companion plugin (optional, recommended)** – Gets events straight from the server API instead of scraping the console; falls back to log tailing without it
+- **Set up from Matrix** – Add and remove servers by chatting with the bridge bot; one room per server, grouped in a Space
+- **One authenticated endpoint per server** – The plugin only reads game events and displays chat; it can't run commands, so a leaked token can't take over your server the way an RCON password can
+- **Runs anywhere** – Servers can be on the same Docker network, your LAN, Tailscale, or behind an HTTPS reverse proxy on the internet
+- **Robust connection** – Automatic reconnect with replay of events missed while disconnected
 - **Player avatars** – Renders each ghost user's avatar from the player's skin (Mojang for Java, GeyserMC for Bedrock/Floodgate)
-- **Portal avatars** – Set a custom room avatar per server via Docker label
-- **Docker event watcher** – Automatically connects/disconnects when containers start/stop
-- **Relay mode** – Lets non-logged-in Matrix users chat through the bridge
+- **Relay mode** – Lets everyone in the room chat through the bridge
 - **End-to-bridge encryption** – Supports encryption between Matrix clients and the bridge
 - **Floodgate support** – Handles Bedrock player names (prefixed with `.`)
 
 ## Requirements
 
 - A Matrix homeserver (Synapse, Conduit, etc.) with appservice support
-- Docker (the bridge communicates with Minecraft servers via the Docker API)
-- Minecraft server(s) running in Docker with RCON enabled
+- Minecraft server(s) running Spigot, Paper or a Paper fork, with the companion plugin
 
 ## Quick Start
 
@@ -41,14 +40,11 @@ services:
     restart: unless-stopped
     volumes:
       - ./data:/data
-      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - UID=1337
       - GID=1337
       - PROVISIONING_SECRET=your-secret-here
 ```
-
-> The Docker socket must be mounted so the bridge can discover and tail logs from Minecraft containers.
 
 ### 3. Generate config and registration files
 
@@ -120,7 +116,7 @@ bridge:
 
 - `relay` – Can receive messages through the relay bot (see Relay Mode below)
 - `user` – Can use the bridge
-- `admin` – Can log in and provision the bridge
+- `admin` – Can log in, add and remove servers
 
 #### Relay mode (important!)
 
@@ -134,7 +130,7 @@ bridge:
             - "@yourusername:example.com"
 ```
 
-The bridge adds the sender's display name to the `tellraw` command automatically, so configure `message_formats` to only include the message body (to avoid double names):
+The bridge adds the sender's display name in game automatically, so configure `message_formats` to only include the message body (to avoid double names):
 
 ```yaml
 bridge:
@@ -156,61 +152,48 @@ bridge:
     bridge_notices: true
 ```
 
-### 6. Label your Minecraft containers
+Relays can also be changed per room with the built-in `set-relay` / `unset-relay` commands.
 
-The bridge discovers Minecraft servers by Docker labels. Add these to your Minecraft server's `docker-compose.yaml`:
+### 6. Install the plugin on your Minecraft servers
+
+With `itzg/minecraft-server`, add the plugin URL to `PLUGINS` and the image downloads it on startup:
 
 ```yaml
 services:
   mc:
     image: itzg/minecraft-server
     container_name: minecraft-mc-1
-    labels:
-      mc-bridge.enable: "true"                              # Required – enables discovery
-      mc-bridge.name: "Minecraft Server vibb.me"            # Optional – display name in Matrix
-      mc-bridge.avatar: "mxc://example.com/room-avatar"     # Optional – room avatar (mxc:// URI)
-      mc-bridge.rcon-port: "25575"                           # Optional – defaults to 25575
     environment:
       EULA: "TRUE"
-      RCON_ENABLE: "true"
-      RCON_PASSWORD: "your-rcon-password"
-```
-
-The label prefix (`mc-bridge`) is configurable via `label_prefix` in the network config.
-
-| Label | Required | Description |
-|-------|----------|-------------|
-| `mc-bridge.enable` | Yes | Must be `"true"` to enable discovery |
-| `mc-bridge.name` | No | Display name for the Matrix room (defaults to container name) |
-| `mc-bridge.avatar` | No | `mxc://` URI for the room avatar |
-| `mc-bridge.rcon-port` | No | RCON port if non-standard (default: 25575) |
-| `mc-bridge.events-port` | No | Companion plugin port if non-standard (default: 25580) |
-| `mc-bridge.source` | No | `auto` (default: plugin if reachable, else log tailing), `plugin` or `log` |
-
-The bridge reads `RCON_PASSWORD` from the container's environment variables automatically. Containers without `RCON_PASSWORD` set are skipped.
-
-### 7. Install the companion plugin (recommended)
-
-Without the plugin, the bridge reads events by parsing the server console, which breaks whenever a server update changes the log format. The companion plugin sends chat, join/leave, death and advancement events straight from the server API. It works on Spigot, Paper and Paper forks.
-
-With `itzg/minecraft-server`, add the plugin URL to `PLUGINS` and the image downloads it on startup:
-
-```yaml
-    environment:
+      TYPE: PAPER
       PLUGINS: |
         https://github.com/palchrb/matrix-minecraft/releases/download/plugin-latest/matrix-minecraft-bridge.jar
 ```
 
-No other setup is needed. The plugin listens on port `25580` inside the container and accepts the container's `RCON_PASSWORD` as its token, which the bridge already reads. On startup the bridge logs `Event source: companion plugin`, or `Companion plugin not reachable, event source: log tailing` if the plugin isn't there.
+Otherwise, drop the jar from the [plugin-latest release](https://github.com/palchrb/matrix-minecraft/releases/tag/plugin-latest) into `plugins/`.
 
-Don't publish port `25580` to the host; the bridge reaches it over the Docker network, same as RCON.
+On first start the plugin generates a random token and listens on port `25580`. Show the token in the server console with:
 
-Optional overrides (set them on the Minecraft container, both sides read them):
+```
+/matrixbridge token
+```
+
+Optional settings, on the Minecraft container or in `plugins/MatrixMinecraftBridge/config.yml`:
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `MC_BRIDGE_PORT` | `25580` | Port of the plugin's event stream |
-| `MC_BRIDGE_TOKEN` | `RCON_PASSWORD` | Shared secret between plugin and bridge |
+| `MC_BRIDGE_PORT` | `25580` | Port the plugin listens on |
+| `MC_BRIDGE_TOKEN` | generated | Token the bridge must present (overrides the generated one) |
+
+### 7. Make the plugin reachable from the bridge
+
+The plugin speaks plain HTTP. Pick whichever fits:
+
+- **Same Docker host:** put the bridge and the Minecraft containers on the same Docker network and use `http://<container-name>:25580`. Don't publish the port.
+- **LAN or Tailscale:** `http://<ip-or-name>:25580`.
+- **Over the internet:** put an HTTPS reverse proxy (Caddy, Traefik, nginx) in front of the port and use `https://...`. Turn off response buffering for the `/events` stream if your proxy buffers by default.
+
+The bridge refuses plain `http://` to public addresses, since the token would be sent unencrypted. It's allowed for loopback, private and Tailscale IPs, single-label names like Docker container names, and `.ts.net`/`.local`/`.lan`/`.internal`/`.home.arpa` names.
 
 ### 8. Start the bridge
 
@@ -218,15 +201,31 @@ Optional overrides (set them on the Minecraft container, both sides read them):
 docker compose up -d matrix-minecraft
 ```
 
-### 9. Log in via Matrix
+### 9. Set it up from Matrix
 
-Send a message to the bridge bot (`@minecraftbot:example.com`) or use the `login` flow in your Matrix client (Element, etc.):
+Start a chat with the bridge bot (`@minecraftbot:example.com`). Only bridge admins (see permissions) can do this.
 
-1. Start a chat with the bridge bot
-2. Select "Provisioning Secret" login flow
-3. Enter the provisioning secret you configured
+1. **Once:** `login provisioning-secret`, then enter the provisioning secret.
+2. **Per server:** `login add-server`, then enter the plugin URL, the token and a name for the room when the bot asks for them.
 
-The bridge will automatically discover labeled Minecraft containers and create Matrix rooms for each one.
+The bridge checks the URL and token right away, creates a room for the server in the Minecraft space and invites you. Invite whoever else should be in it; with relay mode on, their messages are bridged too. Token messages are redacted from the chat automatically.
+
+Running `login add-server` again with the same URL updates the token or room name.
+
+Other commands:
+
+| Command | Description |
+|---------|-------------|
+| `list-servers` | Servers with their connection status and time of the last event |
+| `remove-server <id>` | Disconnect a server (its room is kept; `delete-portal` in the room removes it) |
+
+#### Upgrading from Docker discovery
+
+Earlier versions discovered servers through Docker labels and used RCON. After upgrading:
+
+1. Add the plugin to each server (step 6) and restart it.
+2. Run `login add-server` for each server with `http://<container-name>:25580`. The server ID is derived from the URL host, so it matches the old container-based ID and your existing rooms are reused.
+3. Remove the `/var/run/docker.sock` mount from the bridge and the `mc-bridge.*` labels from the Minecraft containers. RCON can stay enabled for itzg's own tools; the bridge no longer uses it.
 
 ## Network Connector Config
 
@@ -234,19 +233,7 @@ These settings go under the `network:` section in `config.yaml`:
 
 ```yaml
 network:
-    # Docker socket path
-    docker_host: unix:///var/run/docker.sock
-
-    # Label prefix on Minecraft containers
-    label_prefix: mc-bridge
-
-    # Default RCON port
-    default_rcon_port: 25575
-
-    # Default companion plugin port
-    default_events_port: 25580
-
-    # Tellraw message formatting colors
+    # How Matrix messages look in game (named Minecraft colors)
     prefix_text: "[Matrix]"
     prefix_color: light_purple
     sender_color: aqua
@@ -265,11 +252,10 @@ network:
 
 ## How It Works
 
-1. **Discovery** – On login (and on container start events), the bridge scans Docker for containers with `mc-bridge.enable=true`
-2. **Events** – For each server, the bridge subscribes to the companion plugin's event stream (`http://<container>:25580/events`, Server-Sent Events with automatic reconnect and replay of missed events). If the plugin isn't installed, it attaches to the container's stdout via the Docker API and parses Minecraft log lines with regex instead
-3. **RCON** – Matrix-to-Minecraft messages are sent via RCON `tellraw` commands with formatted JSON
+1. **Servers** – Added with `login add-server` and stored in the bridge database. The server ID (and portal room) is derived from the plugin URL.
+2. **Events** – For each server, the bridge subscribes to the plugin's Server-Sent Events stream (`/events`), reconnecting automatically and resuming with `Last-Event-ID` so events missed during a short disconnect are replayed.
+3. **Chat to Minecraft** – Matrix messages are posted to the plugin's `/send` endpoint, which shows them with `tellraw`. The text is placed in a component the plugin builds itself, so it can't inject formatting, click events or commands. If the plugin can't show it, the message is marked as not delivered in Matrix.
 4. **Avatars** – When a Minecraft player first sends a message, their skin is looked up via Mojang (Java) or GeyserMC (Bedrock), the face is rendered and set as their ghost user's avatar (re-checked hourly, re-uploaded only when the skin changes)
-5. **Auto-reconnect** – Docker events (start/stop/die) trigger automatic provisioning or disconnection
 
 ## Building from Source
 
@@ -279,7 +265,7 @@ cd matrix-minecraft
 ./build.sh
 ```
 
-Build the companion plugin (needs Java 17+ and Maven):
+Build the plugin (needs Java 17+ and Maven):
 
 ```bash
 mvn -f plugin/pom.xml package   # → plugin/target/matrix-minecraft-bridge.jar
@@ -293,12 +279,7 @@ docker build -t matrix-minecraft .
 
 ## Networking
 
-The bridge container needs to:
-- Reach your Matrix homeserver (for appservice API)
-- Access the Docker socket (`/var/run/docker.sock`)
-- Reach Minecraft containers on RCON port (they share the Docker network)
-
-If your homeserver is on the same Docker host, put them on the same Docker network:
+The bridge needs to reach your Matrix homeserver and each Minecraft server's plugin port, and the homeserver needs to reach the bridge's appservice port. If your homeserver and Minecraft servers are on the same Docker host, put them on shared Docker networks:
 
 ```yaml
 services:
@@ -315,16 +296,13 @@ networks:
     external: true
 ```
 
-Make sure your Minecraft server containers are on the same network so the bridge can reach them by container name (used as hostname for RCON).
-
 ## Troubleshooting
 
-- **"No RCON_PASSWORD in container env"** – Set `RCON_PASSWORD` as an environment variable on your Minecraft container
-- **RCON connection failures** – Ensure RCON is enabled (`RCON_ENABLE=true`) and the bridge can reach the container on the Docker network
-- **No containers found** – Check that `mc-bridge.enable=true` label is set and the container is running
+- **`list-servers` shows ❌** – The status shows the last error. "rejected the token": compare with `/matrixbridge token` and run `login add-server` again. "connection refused" / timeouts: the bridge can't reach the plugin port (network, firewall, or the server is down)
+- **"couldn't reach the plugin" when adding a server** – Check that the server log says `[MatrixMinecraftBridge] Bridge endpoint listening on ...` and that the URL works from inside the bridge container
+- **"refusing plain http://"** – Use `https://` through a reverse proxy, or a private address (see step 7)
+- **Matrix messages marked as not delivered** – The plugin couldn't be reached or couldn't show the message; check `list-servers` and the bridge log
 - **Avatar fetch errors** – Avatars are rendered from the player's skin via Mojang (Java) or GeyserMC (Bedrock); offline-mode names without a matching account get the default avatar. A Bedrock player's skin shows up once GeyserMC has seen them on a Geyser server
-- **Join/chat events stopped showing up after a server update** – The console log format changed. Install the companion plugin (step 7). The log tailer also logs a `WRN` "log format may have changed" when it sees an event-like line it can't parse
-- **Plugin not detected** – Check the server log for `[MatrixMinecraftBridge] Streaming game events`, and that `MC_BRIDGE_TOKEN`/`RCON_PASSWORD` match on both sides
 - **Double usernames in chat** – Configure relay `message_formats` to use only `{{ .Message }}` (see Relay Mode above)
 
 ## License

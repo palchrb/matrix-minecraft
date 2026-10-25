@@ -1,20 +1,37 @@
 package io.github.palchrb.matrixminecraft;
 
-import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.util.Properties;
+import java.security.SecureRandom;
+import java.util.Base64;
+import java.util.Set;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import org.bukkit.Bukkit;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 
 /**
- * Companion plugin for matrix-minecraft. Exposes game events as a
- * Server-Sent Events stream that the bridge subscribes to, so the bridge no
- * longer has to scrape the server console.
+ * Companion plugin for matrix-minecraft. Streams game events to the bridge
+ * and shows Matrix messages in game, over one token-protected HTTP endpoint,
+ * so the bridge needs neither console scraping nor RCON.
  */
 public final class BridgePlugin extends JavaPlugin {
+    private static final Set<String> COLORS = Set.of(
+            "black", "dark_blue", "dark_green", "dark_aqua", "dark_red", "dark_purple",
+            "gold", "gray", "dark_gray", "blue", "green", "aqua", "red", "light_purple",
+            "yellow", "white");
+    private static final int MAX_SENDER_LENGTH = 64;
+    private static final int MAX_MESSAGE_LENGTH = 2000;
+
+    private final Gson gson = new GsonBuilder().disableHtmlEscaping().create();
     private EventServer server;
+    private String token;
 
     @Override
     public void onEnable() {
@@ -31,23 +48,23 @@ public final class BridgePlugin extends JavaPlugin {
             }
         }
 
-        String token = resolveToken();
-        if (token == null) {
-            getLogger().severe("No token configured: set token in config.yml, MC_BRIDGE_TOKEN, "
-                    + "RCON_PASSWORD or rcon.password. Event stream disabled.");
-            return;
+        token = resolveToken();
+        if (token.length() < 24) {
+            getLogger().warning("The bridge token is short; anyone who can reach port " + port
+                    + " could guess it. Prefer the generated token or at least 24 random characters.");
         }
 
         try {
-            server = new EventServer(getLogger(), bind, port, token, getDescription().getVersion());
+            server = new EventServer(getLogger(), bind, port, token, this::healthInfo, this::broadcast);
             server.start();
         } catch (IOException e) {
-            getLogger().severe("Failed to start event server on " + bind + ":" + port + ": " + e);
+            getLogger().severe("Failed to start bridge endpoint on " + bind + ":" + port + ": " + e);
             server = null;
             return;
         }
         getServer().getPluginManager().registerEvents(new GameEventListener(this, server), this);
-        getLogger().info("Streaming game events on " + bind + ":" + port + "/events");
+        getLogger().info("Bridge endpoint listening on " + bind + ":" + port
+                + ". Run /matrixbridge token in the console to show the token.");
     }
 
     @Override
@@ -58,30 +75,95 @@ public final class BridgePlugin extends JavaPlugin {
         }
     }
 
+    @Override
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (args.length == 1 && args[0].equalsIgnoreCase("token")) {
+            sender.sendMessage("Matrix bridge token: " + token);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Token precedence: MC_BRIDGE_TOKEN, then config.yml, then a random token
+     * generated on first start and saved to config.yml.
+     */
     private String resolveToken() {
-        String token = getConfig().getString("token", "");
-        if (!token.isBlank()) {
-            return token;
+        String env = System.getenv("MC_BRIDGE_TOKEN");
+        if (env != null && !env.isBlank()) {
+            return env.trim();
         }
-        for (String env : new String[] {"MC_BRIDGE_TOKEN", "RCON_PASSWORD"}) {
-            String v = System.getenv(env);
-            if (v != null && !v.isBlank()) {
-                return v;
-            }
+        String configured = getConfig().getString("token", "");
+        if (!configured.isBlank()) {
+            return configured.trim();
         }
-        File props = new File("server.properties");
-        if (props.isFile()) {
-            Properties p = new Properties();
-            try (InputStream in = new FileInputStream(props)) {
-                p.load(in);
-                String v = p.getProperty("rcon.password", "");
-                if (!v.isBlank()) {
-                    return v;
-                }
-            } catch (IOException e) {
-                getLogger().warning("Could not read server.properties: " + e);
-            }
+        byte[] raw = new byte[32];
+        new SecureRandom().nextBytes(raw);
+        String generated = Base64.getUrlEncoder().withoutPadding().encodeToString(raw);
+        getConfig().set("token", generated);
+        saveConfig();
+        getLogger().info("Generated a new bridge token and saved it to config.yml: " + generated);
+        return generated;
+    }
+
+    private JsonObject healthInfo() {
+        JsonObject info = new JsonObject();
+        info.addProperty("plugin", "matrix-minecraft-bridge");
+        info.addProperty("version", getDescription().getVersion());
+        info.addProperty("server", Bukkit.getName() + " " + Bukkit.getBukkitVersion());
+        info.addProperty("motd", Bukkit.getMotd());
+        return info;
+    }
+
+    /**
+     * Shows a Matrix message to everyone in game. Runs tellraw on the main
+     * thread with a component built here from plain strings, so the sender
+     * can't inject click events or commands, and waits for it to finish so
+     * the bridge only reports success once the message was shown.
+     */
+    private void broadcast(EventServer.SendRequest req) throws Exception {
+        EventServer.SendRequest.Format f = req.format != null ? req.format : new EventServer.SendRequest.Format();
+        String sender = clean(req.sender, MAX_SENDER_LENGTH);
+        String message = clean(req.message, MAX_MESSAGE_LENGTH);
+
+        JsonArray parts = new JsonArray();
+        parts.add("");
+        String prefix = f.prefix != null ? clean(f.prefix, 32) : "[Matrix]";
+        if (!prefix.isEmpty()) {
+            parts.add(part(prefix + " ", color(f.prefix_color, "light_purple"), true));
         }
-        return null;
+        parts.add(part("<" + sender + "> ", color(f.sender_color, "aqua"), false));
+        parts.add(part(message, color(f.message_color, "white"), false));
+        String command = "tellraw @a " + gson.toJson(parts);
+
+        Future<Boolean> result = Bukkit.getScheduler().callSyncMethod(this,
+                () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), command));
+        if (!result.get(5, TimeUnit.SECONDS)) {
+            throw new IllegalStateException("tellraw was not executed");
+        }
+    }
+
+    private static JsonObject part(String text, String color, boolean bold) {
+        JsonObject o = new JsonObject();
+        o.addProperty("text", text);
+        o.addProperty("color", color);
+        if (bold) {
+            o.addProperty("bold", true);
+        }
+        return o;
+    }
+
+    private static String color(String requested, String fallback) {
+        return requested != null && COLORS.contains(requested) ? requested : fallback;
+    }
+
+    /** Drops control characters (except newlines) and caps the length. */
+    private static String clean(String s, int maxLength) {
+        StringBuilder b = new StringBuilder(Math.min(s.length(), maxLength));
+        s.codePoints()
+                .filter(cp -> cp == '\n' || !Character.isISOControl(cp))
+                .limit(maxLength)
+                .forEach(b::appendCodePoint);
+        return b.toString().strip();
     }
 }

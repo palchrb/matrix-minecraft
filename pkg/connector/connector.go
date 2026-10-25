@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	dockerclient "github.com/docker/docker/client"
 	"github.com/rs/zerolog"
 	"go.mau.fi/util/configupgrade"
 	"maunium.net/go/mautrix/bridgev2"
+	"maunium.net/go/mautrix/bridgev2/commands"
 	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/matrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -23,11 +23,12 @@ import (
 // Historically this type also held per-server fields (container name, RCON
 // credentials, avatar) back when each Minecraft server was modelled as its
 // own UserLogin. Those fields are kept so the struct still deserialises old
-// rows cleanly, but they are unused on the current single-login model and
-// should be considered deprecated — per-server state now lives in-memory on
-// MCClient.
+// rows cleanly, but they are unused and should be considered deprecated.
 type MCLoginMetadata struct {
 	CreatedAt time.Time `json:"created_at"`
+
+	// Servers are the Minecraft servers added with "login add-server".
+	Servers []ServerConfig `json:"servers,omitempty"`
 
 	// Deprecated: only used by legacy `server:*` rows left over from the
 	// one-UserLogin-per-server design. Kept so the JSON unmarshal still
@@ -45,7 +46,6 @@ type MCLoginMetadata struct {
 type MCConnector struct {
 	br             *bridgev2.Bridge
 	Config         Config
-	docker         *dockerclient.Client
 	avatarFetcher  *AvatarFetcher
 	log            zerolog.Logger
 	networkIconMXC id.ContentURIString // Bot avatar from config, used as space icon
@@ -66,19 +66,9 @@ func (mc *MCConnector) Init(bridge *bridgev2.Bridge) {
 func (mc *MCConnector) Start(ctx context.Context) error {
 	mc.log.Info().Msg("Starting Minecraft connector")
 
-	var err error
-	mc.docker, err = dockerclient.NewClientWithOpts(
-		dockerclient.FromEnv,
-		dockerclient.WithAPIVersionNegotiation(),
-	)
-	if err != nil {
-		return fmt.Errorf("Docker client failed: %w", err)
+	if proc, ok := mc.br.Commands.(*commands.Processor); ok {
+		proc.AddHandlers(cmdListServers, cmdRemoveServer)
 	}
-
-	if _, err := mc.docker.Ping(ctx); err != nil {
-		return fmt.Errorf("Docker API not available: %w", err)
-	}
-	mc.log.Info().Msg("Docker API connected")
 
 	avatarURL := mc.Config.AvatarAPIURL
 	// Starlight Skins (the old default) stopped serving renders, so treat
@@ -246,29 +236,38 @@ func (mc *MCConnector) LoadUserLogin(ctx context.Context,
 func (mc *MCConnector) GetLoginFlows() []bridgev2.LoginFlow {
 	return []bridgev2.LoginFlow{{
 		Name:        "Provisioning Secret",
-		Description: "Authorize the bridge with a provisioning secret",
-		ID:          "provisioning-secret",
+		Description: "Authorize the bridge with a provisioning secret (once)",
+		ID:          flowProvisioningSecret,
+	}, {
+		Name:        "Add Minecraft server",
+		Description: "Connect a Minecraft server running the matrix-minecraft plugin",
+		ID:          flowAddServer,
 	}}
 }
 
 func (mc *MCConnector) CreateLogin(ctx context.Context,
 	user *bridgev2.User, flowID string) (bridgev2.LoginProcess, error) {
-	if flowID != "provisioning-secret" {
+	switch flowID {
+	case flowProvisioningSecret:
+		return &MCAdminLogin{User: user, Connector: mc}, nil
+	case flowAddServer:
+		return &MCAddServerLogin{User: user, Connector: mc}, nil
+	default:
 		return nil, fmt.Errorf("unknown login flow: %s", flowID)
 	}
-	return &MCAdminLogin{User: user, Connector: mc}, nil
 }
 
-// makePortalKey creates the PortalKey for a Minecraft server.
+// makePortalKey creates the PortalKey for a Minecraft server, keyed by
+// server ID.
 //
 // Receiver is intentionally left empty: portals are shared (anyone the admin
 // invites ends up in the same room), and the bridgev2 framework treats an
 // empty receiver as "multi-user portal". This matches how the bridge behaved
 // before the refactor, so existing portal rows keep working without any
 // schema migration.
-func makePortalKey(containerName string) networkid.PortalKey {
+func makePortalKey(serverID string) networkid.PortalKey {
 	return networkid.PortalKey{
-		ID: networkid.PortalID(containerName),
+		ID: networkid.PortalID(serverID),
 	}
 }
 

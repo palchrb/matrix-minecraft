@@ -3,15 +3,11 @@ package connector
 import (
 	"context"
 	"fmt"
-	"strings"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/events"
-	"github.com/docker/docker/api/types/filters"
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/database"
@@ -22,96 +18,86 @@ import (
 	"maunium.net/go/mautrix/id"
 )
 
-// mcServer is the internal state for a single Minecraft container the bridge
-// is connected to. One MCClient manages many mcServer instances — one per
-// labeled container discovered via Docker.
+// mcServer is the running state for one configured Minecraft server.
 type mcServer struct {
-	containerName string
-	containerID   string
-	displayName   string
-	avatarMXC     string
-
-	rcon *RCONClient
-
+	cfg    ServerConfig
+	stream *PluginStream
 	lineCh chan ChatLine
 
-	ctx    context.Context
 	cancel context.CancelFunc
 }
 
 // MCClient implements bridgev2.NetworkAPI for the admin user.
 //
 // A single MCClient owns one Matrix Space (the admin login's SpaceRoom) and
-// one portal per discovered Minecraft container, keyed by container name.
-// This matches the pattern used by matrix-garmin-messenger: one UserLogin,
-// many portals — instead of the previous one-UserLogin-per-server design.
+// one portal per configured Minecraft server, keyed by server ID. Servers
+// are added with "login add-server" and stored in the login's metadata.
 type MCClient struct {
 	UserLogin *bridgev2.UserLogin
 	Connector *MCConnector
 
 	AvatarFetch *AvatarFetcher
 
-	servers   map[string]*mcServer
-	serversMu sync.Mutex
+	// mu guards servers, ctx and the server list in the login metadata.
+	mu      sync.Mutex
+	servers map[string]*mcServer
+	ctx     context.Context
+	cancel  context.CancelFunc
 
 	// msgSeq keeps remote message IDs unique when two events share a
 	// timestamp (the plugin reports millisecond precision).
 	msgSeq atomic.Uint64
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	log    zerolog.Logger
+	log zerolog.Logger
 }
 
 var _ bridgev2.NetworkAPI = (*MCClient)(nil)
 
 func newMCClient(conn *MCConnector, login *bridgev2.UserLogin) *MCClient {
+	ctx, cancel := context.WithCancel(login.Bridge.BackgroundCtx)
 	return &MCClient{
 		UserLogin:   login,
 		Connector:   conn,
 		AvatarFetch: conn.avatarFetcher,
 		servers:     make(map[string]*mcServer),
+		ctx:         ctx,
+		cancel:      cancel,
 		log: conn.log.With().
 			Str("login_id", string(login.ID)).
 			Logger(),
 	}
 }
 
-// Connect is called by bridgev2 on startup for every loaded login, and
-// manually by the login flow after the admin provides the provisioning
-// secret. It discovers all labeled Minecraft containers and starts the
-// Docker event watcher. The admin login's Matrix Space is created lazily
-// by bridgev2 the first time a portal triggers MarkInPortal (with the
-// NetworkIcon we declare in GetName() as its initial avatar), so there's
-// no need to pre-create it here.
-func (c *MCClient) Connect(ctx context.Context) {
-	// Cancel any previous Connect()'s background work before starting fresh.
-	if c.cancel != nil {
-		c.cancel()
+func (c *MCClient) metadata() *MCLoginMetadata {
+	meta, ok := c.UserLogin.Metadata.(*MCLoginMetadata)
+	if !ok || meta == nil {
+		meta = &MCLoginMetadata{}
+		c.UserLogin.Metadata = meta
 	}
-	bgCtx, cancel := context.WithCancel(c.UserLogin.Bridge.BackgroundCtx)
-	c.ctx = bgCtx
-	c.cancel = cancel
+	return meta
+}
 
-	// Watch Docker events before the initial scan, so a container that is
-	// (re)created while we're scanning still gets picked up.
-	go c.watchDockerEvents(bgCtx)
+// Connect is called by bridgev2 on startup for every loaded login. It
+// starts a plugin connection for every configured server. The admin
+// login's Matrix Space is created lazily by bridgev2 the first time a
+// portal triggers MarkInPortal (with the NetworkIcon we declare in
+// GetName() as its initial avatar), so there's no need to pre-create it.
+func (c *MCClient) Connect(ctx context.Context) {
+	c.mu.Lock()
+	c.stopAllLocked()
+	c.ctx, c.cancel = context.WithCancel(c.UserLogin.Bridge.BackgroundCtx)
+	servers := slices.Clone(c.metadata().Servers)
+	c.mu.Unlock()
 
-	if err := c.discoverAll(ctx); err != nil {
-		c.log.Error().Err(err).Msg("Initial Docker discovery failed")
-		c.UserLogin.BridgeState.Send(status.BridgeState{
-			StateEvent: status.StateTransientDisconnect,
-			Error:      "docker-discovery-failed",
-			Message:    fmt.Sprintf("Initial Docker discovery failed: %v", err),
-		})
-		return
+	if len(servers) == 0 {
+		c.log.Info().Msg("No Minecraft servers configured yet; add one with `login add-server`")
+	}
+	for _, cfg := range servers {
+		c.startServer(ctx, cfg)
 	}
 
 	// Push the current bot avatar onto the shared space in case it changed
-	// in config.yaml since the space was first created. This runs after
-	// discoverAll so the space has had a chance to be created; if it
-	// hasn't been yet (very first Connect with no servers), updateSpaceAvatar
-	// silently no-ops and the correct avatar is used at creation time anyway.
+	// in config.yaml since the space was first created.
 	c.Connector.updateSpaceAvatar(ctx, c.UserLogin)
 
 	c.UserLogin.BridgeState.Send(status.BridgeState{
@@ -119,20 +105,18 @@ func (c *MCClient) Connect(ctx context.Context) {
 	})
 }
 
-// Disconnect stops all per-server connections and the Docker event watcher.
+// Disconnect stops all plugin connections.
 func (c *MCClient) Disconnect() {
 	c.log.Info().Msg("Disconnecting admin client")
-	if c.cancel != nil {
-		c.cancel()
-	}
-	c.serversMu.Lock()
-	defer c.serversMu.Unlock()
-	for name, s := range c.servers {
-		c.log.Debug().Str("container", name).Msg("Stopping server")
-		if s.cancel != nil {
-			s.cancel()
-		}
-		s.rcon.Disconnect()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.stopAllLocked()
+	c.cancel()
+}
+
+func (c *MCClient) stopAllLocked() {
+	for _, s := range c.servers {
+		s.cancel()
 	}
 	c.servers = make(map[string]*mcServer)
 }
@@ -149,30 +133,141 @@ func (c *MCClient) IsThisUser(ctx context.Context, userID networkid.UserID) bool
 	return string(userID) == string(c.UserLogin.UserMXID)
 }
 
-// getServer returns the internal mcServer for a given container name, or nil.
-func (c *MCClient) getServer(containerName string) *mcServer {
-	c.serversMu.Lock()
-	defer c.serversMu.Unlock()
-	return c.servers[containerName]
+// getServer returns the running server for a portal ID, or nil.
+func (c *MCClient) getServer(serverID string) *mcServer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.servers[serverID]
 }
 
-// GetChatInfo returns the ChatInfo for a portal. portal.ID is the container
-// name — look it up in the servers map to find display name and avatar.
-func (c *MCClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
-	s := c.getServer(string(portal.ID))
+// ─── Server management ──────────────────────────────────────────────────────
 
-	// Default name = container name (portal.ID), in case the server was
-	// removed between events.
-	name := string(portal.ID)
-	var avatarMXC string
-	if s != nil {
-		if s.displayName != "" {
-			name = s.displayName
-		}
-		avatarMXC = s.avatarMXC
+// ServerStatus is one row of list-servers.
+type ServerStatus struct {
+	Config ServerConfig
+	Stream StreamStatus
+	Active bool
+}
+
+// AddServer stores (or updates) a server, (re)starts its plugin connection
+// and makes sure its portal room exists. Returns the room ID.
+func (c *MCClient) AddServer(ctx context.Context, cfg ServerConfig) (id.RoomID, error) {
+	c.mu.Lock()
+	meta := c.metadata()
+	idx := slices.IndexFunc(meta.Servers, func(s ServerConfig) bool { return s.ID == cfg.ID })
+	if idx >= 0 {
+		meta.Servers[idx] = cfg
+	} else {
+		meta.Servers = append(meta.Servers, cfg)
 	}
+	err := c.UserLogin.Save(ctx)
+	c.mu.Unlock()
+	if err != nil {
+		return "", fmt.Errorf("failed to save server: %w", err)
+	}
+	c.log.Info().Str("server", cfg.ID).Str("url", cfg.URL).Msg("Server added")
+	return c.startServer(ctx, cfg), nil
+}
 
-	info := &bridgev2.ChatInfo{
+// RemoveServer stops a server and forgets it. Its Matrix room is kept.
+func (c *MCClient) RemoveServer(ctx context.Context, serverID string) (bool, error) {
+	c.mu.Lock()
+	meta := c.metadata()
+	before := len(meta.Servers)
+	meta.Servers = slices.DeleteFunc(meta.Servers, func(s ServerConfig) bool { return s.ID == serverID })
+	removed := len(meta.Servers) != before
+	if s, ok := c.servers[serverID]; ok {
+		s.cancel()
+		delete(c.servers, serverID)
+	}
+	var err error
+	if removed {
+		err = c.UserLogin.Save(ctx)
+	}
+	c.mu.Unlock()
+	if removed {
+		c.log.Info().Str("server", serverID).Msg("Server removed")
+	}
+	return removed, err
+}
+
+// ListServers returns the configured servers and their connection state.
+func (c *MCClient) ListServers() []ServerStatus {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []ServerStatus
+	for _, cfg := range c.metadata().Servers {
+		st := ServerStatus{Config: cfg}
+		if s, ok := c.servers[cfg.ID]; ok {
+			st.Active = true
+			st.Stream = s.stream.Status()
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+// startServer (re)starts the plugin connection for a server and ensures its
+// Matrix portal exists. Returns the portal's room ID, if it has one.
+func (c *MCClient) startServer(ctx context.Context, cfg ServerConfig) id.RoomID {
+	c.mu.Lock()
+	if old, ok := c.servers[cfg.ID]; ok {
+		old.cancel()
+	}
+	srvCtx, srvCancel := context.WithCancel(c.ctx)
+	srv := &mcServer{
+		cfg:    cfg,
+		stream: NewPluginStream(cfg.URL, cfg.Token, cfg.ID, c.log),
+		lineCh: make(chan ChatLine, 64),
+		cancel: srvCancel,
+	}
+	c.servers[cfg.ID] = srv
+	c.mu.Unlock()
+
+	c.log.Info().Str("server", cfg.ID).Str("name", cfg.Name).Msg("Starting server")
+	go srv.stream.Start(srvCtx, srv.lineCh)
+	go c.receiveLoop(srvCtx, srv)
+
+	// Ensure the Matrix portal exists and that the admin login is marked as
+	// "in" it (the user_portal row). Without that row, bridgev2's
+	// FindPreferredLogin can't route inbound Matrix messages to
+	// HandleMatrixMessage at all.
+	portal, err := c.UserLogin.Bridge.GetPortalByKey(ctx, makePortalKey(cfg.ID))
+	if err != nil {
+		c.log.Warn().Err(err).Str("server", cfg.ID).Msg("GetPortalByKey failed")
+		return ""
+	}
+	chatInfo, _ := c.GetChatInfo(ctx, portal)
+
+	// CreateMatrixRoom is idempotent: for an existing room it only marks the
+	// login as being in the portal.
+	if err := portal.CreateMatrixRoom(ctx, c.UserLogin, chatInfo); err != nil {
+		c.log.Warn().Err(err).Str("server", cfg.ID).Msg("CreateMatrixRoom failed")
+	}
+	c.UserLogin.MarkInPortal(ctx, portal)
+
+	// Push a fresh ChatInfo so the room name reflects the configured name.
+	// bridgev2 skips state events that wouldn't change anything.
+	if portal.MXID != "" {
+		portal.UpdateInfo(ctx, chatInfo, c.UserLogin, nil, time.Time{})
+	}
+	c.log.Info().
+		Str("server", cfg.ID).
+		Str("portal_mxid", string(portal.MXID)).
+		Msg("Server portal ready")
+	return portal.MXID
+}
+
+// ─── Matrix ↔ Minecraft ─────────────────────────────────────────────────────
+
+// GetChatInfo returns the ChatInfo for a portal. portal.ID is the server ID.
+// No avatar is set, so a room avatar chosen in Matrix is left alone.
+func (c *MCClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
+	name := string(portal.ID)
+	if s := c.getServer(string(portal.ID)); s != nil && s.cfg.Name != "" {
+		name = s.cfg.Name
+	}
+	return &bridgev2.ChatInfo{
 		Name: &name,
 		Type: ptrTo(database.RoomTypeDefault),
 		Members: &bridgev2.ChatMemberList{
@@ -182,22 +277,10 @@ func (c *MCClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*b
 					IsFromMe: true,
 				},
 				Membership: event.MembershipJoin,
-				PowerLevel: ptrInt(50),
+				PowerLevel: ptrTo(50),
 			}},
 		},
-	}
-
-	if avatarMXC != "" {
-		info.Avatar = &bridgev2.Avatar{
-			ID:  networkid.AvatarID("label-avatar-" + string(portal.ID)),
-			MXC: id.ContentURIString(avatarMXC),
-		}
-	}
-	return info, nil
-}
-
-func ptrInt(v int) *int {
-	return &v
+	}, nil
 }
 
 func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bridgev2.UserInfo, error) {
@@ -287,33 +370,25 @@ func (c *MCClient) GetCapabilities(ctx context.Context, portal *bridgev2.Portal)
 	}
 }
 
-// HandleMatrixMessage routes a Matrix message to the correct server's RCON.
-// portal.ID is the container name, so we look it up in the servers map.
+// HandleMatrixMessage shows a Matrix message in game through the server's
+// plugin. An error here makes bridgev2 mark the message as not delivered.
 func (c *MCClient) HandleMatrixMessage(ctx context.Context,
 	msg *bridgev2.MatrixMessage) (resp *bridgev2.MatrixMessageResponse, retErr error) {
 
-	containerName := string(msg.Portal.ID)
+	serverID := string(msg.Portal.ID)
 	log := c.log.With().
-		Str("container", containerName).
+		Str("server", serverID).
 		Str("matrix_event", string(msg.Event.ID)).
 		Str("sender", string(msg.Event.Sender)).
 		Logger()
 
-	log.Info().Msg("Received Matrix message for Minecraft")
-
-	// Defer a result log so every path through this function is visible in
-	// the logs, even if it panics or returns silently.
 	defer func() {
 		if r := recover(); r != nil {
-			log.Error().
-				Interface("panic", r).
-				Msg("HandleMatrixMessage panicked")
+			log.Error().Interface("panic", r).Msg("HandleMatrixMessage panicked")
 			retErr = fmt.Errorf("handler panicked: %v", r)
 		}
 		if retErr != nil {
-			log.Warn().Err(retErr).Msg("HandleMatrixMessage returning error")
-		} else {
-			log.Info().Msg("HandleMatrixMessage returning success")
+			log.Warn().Err(retErr).Msg("Failed to send Matrix message to Minecraft")
 		}
 	}()
 
@@ -321,40 +396,22 @@ func (c *MCClient) HandleMatrixMessage(ctx context.Context,
 		return nil, fmt.Errorf("nil content in MatrixMessage")
 	}
 	content := msg.Content
-	log.Debug().
-		Str("msgtype", string(content.MsgType)).
-		Int("body_len", len(content.Body)).
-		Msg("Parsed Matrix content")
-
-	// Only text messages
 	if content.MsgType != event.MsgText && content.MsgType != event.MsgNotice {
 		return nil, fmt.Errorf("message type %s is not supported", content.MsgType)
 	}
-
 	text := content.Body
 	if text == "" {
 		return nil, fmt.Errorf("empty message")
 	}
 
-	s := c.getServer(containerName)
+	s := c.getServer(serverID)
 	if s == nil {
-		return nil, fmt.Errorf("no active server for portal %s", containerName)
-	}
-	if s.rcon == nil {
-		return nil, fmt.Errorf("server %s has no RCON client", containerName)
-	}
-	if !s.rcon.IsConnected() {
-		log.Warn().Msg("RCON is not connected, attempting to reconnect before sending")
-		if err := s.rcon.Connect(ctx); err != nil {
-			return nil, fmt.Errorf("RCON reconnect failed: %w", err)
-		}
+		return nil, fmt.Errorf("no server configured for this room")
 	}
 
-	// Get sender name from Matrix
 	senderName := string(msg.Event.Sender)
 	if msg.OrigSender != nil {
 		senderName = msg.OrigSender.FormattedName
-		log.Debug().Str("relay_sender", senderName).Msg("Using relay sender name")
 	} else {
 		member, err := msg.Portal.Bridge.Matrix.GetMemberInfo(ctx,
 			msg.Portal.MXID, msg.Event.Sender)
@@ -365,438 +422,30 @@ func (c *MCClient) HandleMatrixMessage(ctx context.Context,
 		}
 	}
 
-	log.Info().
-		Str("final_sender_name", senderName).
-		Int("text_len", len(text)).
-		Msg("Forwarding message to RCON")
-
-	// Send via RCON tellraw
-	if err := s.rcon.SendMessage(ctx, senderName, text); err != nil {
-		return nil, fmt.Errorf("RCON SendMessage failed: %w", err)
+	if err := s.stream.Send(ctx, senderName, text, c.sendFormat()); err != nil {
+		return nil, err
 	}
-
-	log.Info().Msg("RCON SendMessage succeeded")
-
-	msgID := networkid.MessageID(fmt.Sprintf("matrix-%s-%d",
-		msg.Event.ID, time.Now().UnixMilli()))
+	log.Debug().Str("sender_name", senderName).Msg("Matrix message shown in game")
 
 	return &bridgev2.MatrixMessageResponse{
 		DB: &database.Message{
-			ID: msgID,
+			ID: networkid.MessageID(fmt.Sprintf("matrix-%s-%d",
+				msg.Event.ID, time.Now().UnixMilli())),
 		},
 	}, nil
 }
 
-// ─── Docker discovery & event watching ───────────────────────────────────────
-
-// discoverAll scans Docker for labeled containers and starts an mcServer for
-// each one that isn't already tracked. Containers that are no longer running
-// are stopped.
-func (c *MCClient) discoverAll(ctx context.Context) error {
-	labelPrefix := c.Connector.Config.LabelPrefix
-	if labelPrefix == "" {
-		labelPrefix = "mc-bridge"
-	}
-
-	containers, err := c.Connector.docker.ContainerList(ctx, container.ListOptions{
-		Filters: filters.NewArgs(
-			filters.Arg("label", labelPrefix+".enable=true"),
-			filters.Arg("status", "running"),
-		),
-	})
-	if err != nil {
-		return fmt.Errorf("ContainerList failed: %w", err)
-	}
-
-	c.log.Info().Int("count", len(containers)).Msg("Found labeled containers")
-
-	found := make(map[string]bool, len(containers))
-	for _, ct := range containers {
-		name := cleanName(ct.Names[0])
-		found[name] = true
-
-		displayName := name
-		if dn, ok := ct.Labels[labelPrefix+".name"]; ok && dn != "" {
-			displayName = dn
-		}
-
-		avatarMXC := ""
-		if mxc, ok := ct.Labels[labelPrefix+".avatar"]; ok && mxc != "" {
-			avatarMXC = mxc
-		}
-
-		info, err := c.Connector.docker.ContainerInspect(ctx, ct.ID)
-		if err != nil {
-			c.log.Warn().Err(err).Str("container", name).
-				Msg("ContainerInspect failed, skipping")
-			continue
-		}
-
-		rconPassword := extractEnv(info.Config.Env, "RCON_PASSWORD")
-		if rconPassword == "" {
-			c.log.Warn().Str("container", name).
-				Msg("No RCON_PASSWORD in container env, skipping")
-			continue
-		}
-
-		rconPort := c.Connector.Config.DefaultRCONPort
-		if portStr, ok := ct.Labels[labelPrefix+".rcon-port"]; ok {
-			fmt.Sscanf(portStr, "%d", &rconPort)
-		}
-
-		// The companion plugin reads the same env vars, so by default both
-		// sides agree on port and token without extra configuration.
-		eventsPort := c.Connector.Config.DefaultEventsPort
-		if eventsPort == 0 {
-			eventsPort = 25580
-		}
-		if portStr := extractEnv(info.Config.Env, "MC_BRIDGE_PORT"); portStr != "" {
-			fmt.Sscanf(portStr, "%d", &eventsPort)
-		}
-		if portStr, ok := ct.Labels[labelPrefix+".events-port"]; ok {
-			fmt.Sscanf(portStr, "%d", &eventsPort)
-		}
-		eventsToken := extractEnv(info.Config.Env, "MC_BRIDGE_TOKEN")
-		if eventsToken == "" {
-			eventsToken = rconPassword
-		}
-		sourceMode := strings.ToLower(ct.Labels[labelPrefix+".source"])
-
-		if err := c.startServer(ctx, mcServerParams{
-			ContainerID:   ct.ID,
-			ContainerName: name,
-			DisplayName:   displayName,
-			AvatarMXC:     avatarMXC,
-			RCONHost:      name,
-			RCONPort:      rconPort,
-			RCONPassword:  rconPassword,
-			EventsPort:    eventsPort,
-			EventsToken:   eventsToken,
-			SourceMode:    sourceMode,
-		}); err != nil {
-			c.log.Error().Err(err).Str("container", name).
-				Msg("Failed to start server")
-		}
-	}
-
-	// Stop any tracked servers whose containers are no longer running.
-	c.serversMu.Lock()
-	var toStop []string
-	for name := range c.servers {
-		if !found[name] {
-			toStop = append(toStop, name)
-		}
-	}
-	c.serversMu.Unlock()
-	for _, name := range toStop {
-		c.stopServer(name, "container not running")
-	}
-
-	return nil
-}
-
-type mcServerParams struct {
-	ContainerID   string
-	ContainerName string
-	DisplayName   string
-	AvatarMXC     string
-	RCONHost      string
-	RCONPort      int
-	RCONPassword  string
-
-	// Companion plugin event stream.
-	EventsPort  int
-	EventsToken string
-	// SourceMode is "plugin", "log" or "auto"/"" (plugin if reachable,
-	// otherwise log tailing).
-	SourceMode string
-}
-
-// startServer adds a new mcServer to the internal map, connects RCON, starts
-// log tailing, and ensures the Matrix portal exists. If the server is
-// already tracked, it updates mutable fields and reconnects RCON if needed.
-func (c *MCClient) startServer(ctx context.Context, p mcServerParams) error {
-	c.serversMu.Lock()
-	existing, ok := c.servers[p.ContainerName]
-	if ok {
-		// Update mutable metadata in place.
-		changed := false
-		if existing.displayName != p.DisplayName {
-			existing.displayName = p.DisplayName
-			changed = true
-		}
-		if existing.avatarMXC != p.AvatarMXC {
-			existing.avatarMXC = p.AvatarMXC
-			changed = true
-		}
-		c.serversMu.Unlock()
-
-		if changed {
-			c.updatePortalInfo(ctx, p.ContainerName)
-		}
-		if !existing.rcon.IsConnected() {
-			c.log.Info().Str("container", p.ContainerName).
-				Msg("RCON disconnected, reconnecting")
-			go func() {
-				if err := existing.rcon.Connect(existing.ctx); err != nil {
-					c.log.Warn().Err(err).Str("container", p.ContainerName).
-						Msg("RCON reconnect failed")
-				}
-			}()
-		}
-		return nil
-	}
-
-	// Brand-new server — build state, attach RCON + log tailer, and create
-	// the portal.
-	srvCtx, srvCancel := context.WithCancel(c.ctx)
-	srv := &mcServer{
-		containerName: p.ContainerName,
-		containerID:   p.ContainerID,
-		displayName:   p.DisplayName,
-		avatarMXC:     p.AvatarMXC,
-		rcon: NewRCONClient(p.RCONHost, p.RCONPort, p.RCONPassword,
-			c.Connector.Config, c.log),
-		lineCh: make(chan ChatLine, 64),
-		ctx:    srvCtx,
-		cancel: srvCancel,
-	}
-	c.servers[p.ContainerName] = srv
-	c.serversMu.Unlock()
-
-	c.log.Info().
-		Str("container", p.ContainerName).
-		Str("display_name", p.DisplayName).
-		Msg("Starting server")
-
-	// Connect RCON in the background: a server that is still booting can
-	// take minutes, and blocking here would hold up discovery of every
-	// other container. The event source is chosen once RCON is up, since
-	// by then the server (and the companion plugin) has finished starting.
-	go func() {
-		if err := srv.rcon.Connect(srvCtx); err != nil {
-			c.log.Warn().Err(err).Str("container", p.ContainerName).
-				Msg("RCON connection failed")
-			// Keep the server tracked anyway; Matrix messages retry RCON.
-		}
-		src := c.chooseEventSource(srvCtx, p)
-		if src != nil {
-			src.Start(srvCtx, srv.lineCh)
-		}
-	}()
-	go c.receiveLoop(srvCtx, srv)
-
-	// Ensure the Matrix portal exists for this container and that the admin
-	// login is marked as "in" it (creating the user_portal row). Without a
-	// user_portal row for the admin, bridgev2's FindPreferredLogin can't
-	// route inbound Matrix messages to HandleMatrixMessage at all. Legacy
-	// `server:*` rows — deleted on startup — used to own those rows and
-	// took them along when the FK cascaded, so we have to recreate them.
-	portalKey := makePortalKey(p.ContainerName)
-	portal, err := c.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
-	if err != nil {
-		c.log.Warn().Err(err).Str("container", p.ContainerName).
-			Msg("GetPortalByKey failed")
-		return nil
-	}
-
-	chatInfo, _ := c.GetChatInfo(ctx, portal)
-
-	// CreateMatrixRoom is idempotent: if the portal already has an MXID it
-	// just calls source.MarkInPortal(ctx, portal) and returns, which is
-	// exactly what we need here to (re-)seed the user_portal row. If the
-	// portal is brand new it runs the full creation flow through the portal
-	// event queue.
-	if createErr := portal.CreateMatrixRoom(ctx, c.UserLogin, chatInfo); createErr != nil {
-		c.log.Warn().Err(createErr).Str("container", p.ContainerName).
-			Msg("CreateMatrixRoom failed")
-	}
-
-	// Belt-and-suspenders: explicitly MarkInPortal so we do not rely on
-	// UpdateInfo or CreateMatrixRoom reaching the MarkInPortal call for
-	// existing rooms. This is a no-op if the login is already cached as
-	// being in the portal.
-	c.UserLogin.MarkInPortal(ctx, portal)
-
-	c.log.Info().
-		Str("container", p.ContainerName).
-		Str("portal_mxid", string(portal.MXID)).
-		Str("login_id", string(c.UserLogin.ID)).
-		Msg("Server portal ready and admin marked in portal")
-
-	// Push a fresh ChatInfo onto the room so name/avatar reflect the
-	// current container labels. Safe to call on every startup — bridgev2
-	// skips state events that would not change anything.
-	if portal.MXID != "" {
-		portal.UpdateInfo(ctx, chatInfo, c.UserLogin, nil, time.Time{})
-	}
-
-	return nil
-}
-
-// chooseEventSource picks where a server's game events come from. The
-// companion plugin is preferred because it reads events from the server API
-// instead of scraping console output; log tailing is the fallback for
-// servers without it. Returns nil only if ctx is cancelled while probing.
-func (c *MCClient) chooseEventSource(ctx context.Context, p mcServerParams) eventSource {
-	log := c.log.With().Str("container", p.ContainerName).Logger()
-	plugin := NewPluginStream(p.RCONHost, p.EventsPort, p.EventsToken, p.ContainerName, c.log)
-	logTailer := NewLogTailer(c.Connector.docker, p.ContainerName, c.log)
-
-	switch p.SourceMode {
-	case "plugin":
-		log.Info().Msg("Event source: plugin (forced by label)")
-		return plugin
-	case "log":
-		log.Info().Msg("Event source: log tailing (forced by label)")
-		return logTailer
-	}
-
-	// The server may still be enabling plugins right after a container
-	// start, so give it a few tries before falling back.
-	var err error
-	for attempt := 1; attempt <= 3; attempt++ {
-		if err = plugin.Probe(ctx); err == nil {
-			log.Info().Int("port", p.EventsPort).Msg("Event source: companion plugin")
-			return plugin
-		}
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(3 * time.Second):
-		}
-	}
-	log.Info().Err(err).Int("port", p.EventsPort).
-		Msg("Companion plugin not reachable, event source: log tailing")
-	return logTailer
-}
-
-// updatePortalInfo pushes a fresh ChatInfo into the portal for a running
-// server after its display name or avatar has changed.
-func (c *MCClient) updatePortalInfo(ctx context.Context, containerName string) {
-	portalKey := makePortalKey(containerName)
-	portal, err := c.UserLogin.Bridge.GetPortalByKey(ctx, portalKey)
-	if err != nil || portal == nil || portal.MXID == "" {
-		return
-	}
-	chatInfo, _ := c.GetChatInfo(ctx, portal)
-	portal.UpdateInfo(ctx, chatInfo, c.UserLogin, nil, time.Time{})
-	// Also re-mark so user_portal stays consistent.
-	c.UserLogin.MarkInPortal(ctx, portal)
-	c.log.Info().Str("container", containerName).
-		Msg("Portal info updated")
-}
-
-// stopServer tears down a single mcServer and removes it from the map. The
-// Matrix room is intentionally left in place.
-func (c *MCClient) stopServer(containerName, reason string) {
-	c.serversMu.Lock()
-	srv, ok := c.servers[containerName]
-	if !ok {
-		c.serversMu.Unlock()
-		return
-	}
-	delete(c.servers, containerName)
-	c.serversMu.Unlock()
-
-	c.log.Info().Str("container", containerName).Str("reason", reason).
-		Msg("Stopping server")
-	if srv.cancel != nil {
-		srv.cancel()
-	}
-	srv.rcon.Disconnect()
-}
-
-// watchDockerEvents listens for Docker container start/stop/die events and
-// adjusts internal server state accordingly. Blocks until ctx is cancelled.
-func (c *MCClient) watchDockerEvents(ctx context.Context) {
-	labelPrefix := c.Connector.Config.LabelPrefix
-	if labelPrefix == "" {
-		labelPrefix = "mc-bridge"
-	}
-
-	c.log.Info().Msg("Starting Docker event watcher")
-	backoff := 5 * time.Second
-	for {
-		if err := c.watchOnce(ctx, labelPrefix); err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			c.log.Warn().Err(err).Dur("retry_in", backoff).
-				Msg("Event stream failed, retrying")
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(backoff):
-		}
+func (c *MCClient) sendFormat() SendFormat {
+	cfg := c.Connector.Config
+	return SendFormat{
+		Prefix:       cfg.PrefixText,
+		PrefixColor:  cfg.PrefixColor,
+		SenderColor:  cfg.SenderColor,
+		MessageColor: cfg.MessageColor,
 	}
 }
 
-func (c *MCClient) watchOnce(ctx context.Context, labelPrefix string) error {
-	msgCh, errCh := c.Connector.docker.Events(ctx, types.EventsOptions{
-		Filters: filters.NewArgs(
-			filters.Arg("type", "container"),
-			filters.Arg("event", "start"),
-			filters.Arg("event", "stop"),
-			filters.Arg("event", "die"),
-			filters.Arg("label", labelPrefix+".enable=true"),
-		),
-	})
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case err := <-errCh:
-			return err
-		case ev := <-msgCh:
-			c.handleDockerEvent(ctx, ev)
-		}
-	}
-}
-
-func (c *MCClient) handleDockerEvent(ctx context.Context, ev events.Message) {
-	name := cleanName(ev.Actor.Attributes["name"])
-
-	switch ev.Action {
-	case "start":
-		c.log.Info().Str("container", name).Msg("Container started")
-		// Wait briefly for RCON to come up.
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(5 * time.Second):
-		}
-		if err := c.discoverAll(ctx); err != nil {
-			c.log.Error().Err(err).Msg("discoverAll failed after container start")
-		}
-	case "stop", "die":
-		c.log.Info().Str("container", name).Msg("Container stopped")
-		c.stopServer(name, string(ev.Action))
-	}
-}
-
-// extractEnv is a small helper used when parsing RCON_PASSWORD out of a
-// container's env list.
-func extractEnv(envList []string, key string) string {
-	prefix := key + "="
-	for _, e := range envList {
-		if strings.HasPrefix(e, prefix) {
-			return strings.TrimPrefix(e, prefix)
-		}
-	}
-	return ""
-}
-
-func cleanName(name string) string {
-	return strings.TrimPrefix(name, "/")
-}
-
-// ─── Log tailer → Matrix ─────────────────────────────────────────────────────
-
-// receiveLoop reads ChatLines from a single server's log tailer and sends
-// them into the bridge as remote events, keyed by container name.
+// receiveLoop forwards one server's game events into the bridge.
 func (c *MCClient) receiveLoop(ctx context.Context, srv *mcServer) {
 	for {
 		select {
@@ -811,19 +460,8 @@ func (c *MCClient) receiveLoop(ctx context.Context, srv *mcServer) {
 func (c *MCClient) handleChatLine(line ChatLine) {
 	// Filter out non-chat events if bridge_all_events is false
 	if !c.Connector.Config.BridgeAllEvents && line.Event != EventChat {
-		c.log.Debug().
-			Str("player", line.PlayerName).
-			Int("event", int(line.Event)).
-			Msg("Dropping non-chat event (bridge_all_events=false)")
 		return
 	}
-
-	c.log.Info().
-		Str("player", line.PlayerName).
-		Str("container", line.ContainerName).
-		Str("text", line.Message).
-		Int("event", int(line.Event)).
-		Msg("Minecraft event received, queueing to bridge")
 
 	c.UserLogin.Bridge.QueueRemoteEvent(c.UserLogin, &simplevent.Message[ChatLine]{
 		EventMeta: simplevent.EventMeta{
@@ -831,10 +469,10 @@ func (c *MCClient) handleChatLine(line ChatLine) {
 			LogContext: func(ctx zerolog.Context) zerolog.Context {
 				return ctx.
 					Str("player", line.PlayerName).
-					Str("container", line.ContainerName).
+					Str("server", line.ServerID).
 					Int("event_type", int(line.Event))
 			},
-			PortalKey:    makePortalKey(line.ContainerName),
+			PortalKey:    makePortalKey(line.ServerID),
 			Sender:       bridgev2.EventSender{Sender: networkid.UserID(line.PlayerName)},
 			CreatePortal: true,
 			Timestamp:    line.Timestamp,
