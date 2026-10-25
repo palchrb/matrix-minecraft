@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -52,8 +53,8 @@ func decodeFace(t *testing.T, data []byte) image.Image {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b := img.Bounds(); b.Dx() != faceSize || b.Dy() != faceSize {
-		t.Fatalf("face is %dx%d, want %dx%d", b.Dx(), b.Dy(), faceSize, faceSize)
+	if b := img.Bounds(); b.Dx() != avatarSize || b.Dy() != avatarSize {
+		t.Fatalf("avatar is %dx%d, want %dx%d", b.Dx(), b.Dy(), avatarSize, avatarSize)
 	}
 	return img
 }
@@ -65,7 +66,8 @@ func sameColor(a, b color.Color) bool {
 }
 
 func TestRenderFace(t *testing.T) {
-	last := faceSize - 1
+	first := (avatarSize - 8*faceScale) / 2
+	last := first + 8*faceScale - 1
 	tests := []struct {
 		name      string
 		skin      []byte
@@ -84,7 +86,15 @@ func TestRenderFace(t *testing.T) {
 				t.Fatal(err)
 			}
 			img := decodeFace(t, data)
-			if got := img.At(0, 0); !sameColor(got, tt.topLeft) {
+			// The face's corners must survive a circular crop.
+			r := float64(avatarSize) / 2
+			if d := math.Hypot(float64(first)-r, float64(first)-r); d > r {
+				t.Errorf("face corner is %.1fpx from centre, outside the %.0fpx circle", d, r)
+			}
+			if _, _, _, a := img.At(0, 0).RGBA(); a != 0 {
+				t.Errorf("margin should be transparent, got alpha %d", a)
+			}
+			if got := img.At(first, first); !sameColor(got, tt.topLeft) {
 				t.Errorf("top-left = %v, want %v", got, tt.topLeft)
 			}
 			if got := img.At(last, last); !sameColor(got, tt.bottomRgt) {
