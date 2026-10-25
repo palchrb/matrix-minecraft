@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -261,4 +262,30 @@ func waitFor(t *testing.T, cond func() bool) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("condition not met in time")
+}
+
+func TestPluginDoesNotFollowRedirects(t *testing.T) {
+	var leaked atomic.Bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "" {
+			leaked.Store(true)
+		}
+		fmt.Fprint(w, `{"plugin":"matrix-minecraft-bridge"}`)
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+r.URL.Path, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	p := newTestStream(t, redirector, "secret")
+	if _, err := p.Probe(context.Background()); err == nil {
+		t.Fatal("probe should fail on a redirect")
+	}
+	if err := p.Send(context.Background(), "a", "b", SendFormat{}); err == nil {
+		t.Fatal("send should fail on a redirect")
+	}
+	if leaked.Load() {
+		t.Fatal("token was sent to the redirect target")
+	}
 }

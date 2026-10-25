@@ -108,6 +108,11 @@ func NewPluginStream(baseURL, token, serverID string, log zerolog.Logger) *Plugi
 		token:    token,
 		serverID: serverID,
 		client: &http.Client{
+			// The plugin never redirects. Following one could send the token
+			// somewhere else, e.g. from https:// to http:// on the same host.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 			Transport: &http.Transport{
 				Proxy:                 http.ProxyFromEnvironment,
 				DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
