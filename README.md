@@ -172,11 +172,13 @@ services:
 
 Otherwise, drop the jar from the [plugin-latest release](https://github.com/palchrb/matrix-minecraft/releases/tag/plugin-latest) into `plugins/`.
 
-On first start the plugin generates a random token and listens on port `25580`. Show the token in the server console with:
+On first start the plugin generates a random token and listens on port `25580`. Show the token in the server console:
 
 ```
-/matrixbridge token
+matrixbridge token
 ```
+
+or from the host with `docker exec <container> rcon-cli matrixbridge token`. For security the command refuses to show the token to players in game, ops included.
 
 Optional settings, on the Minecraft container or in `plugins/MatrixMinecraftBridge/config.yml`:
 

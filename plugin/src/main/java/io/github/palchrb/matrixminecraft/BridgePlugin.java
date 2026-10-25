@@ -14,6 +14,8 @@ import com.google.gson.JsonObject;
 import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.ConsoleCommandSender;
+import org.bukkit.command.RemoteConsoleCommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 
 /**
@@ -78,6 +80,14 @@ public final class BridgePlugin extends JavaPlugin {
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (args.length == 1 && args[0].equalsIgnoreCase("token")) {
+            // The token is the only key to the bridge endpoint, so keep it
+            // off players' screens (and out of command block output): only
+            // the server console and RCON may read it.
+            if (!(sender instanceof ConsoleCommandSender) && !(sender instanceof RemoteConsoleCommandSender)) {
+                sender.sendMessage("For security, the bridge token can only be shown in the server console "
+                        + "(or via RCON, e.g. docker exec <container> rcon-cli matrixbridge token).");
+                return true;
+            }
             sender.sendMessage("Matrix bridge token: " + token);
             return true;
         }

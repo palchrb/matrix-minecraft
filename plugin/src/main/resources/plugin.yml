@@ -6,10 +6,10 @@ description: Connects the server to matrix-minecraft (chat, join/leave, death an
 website: https://github.com/palchrb/matrix-minecraft
 commands:
   matrixbridge:
-    description: Matrix bridge commands
-    usage: /matrixbridge token
+    description: Matrix bridge commands (console only)
+    usage: matrixbridge token
     permission: matrixbridge.admin
 permissions:
   matrixbridge.admin:
-    description: Show the Matrix bridge token
+    description: Use /matrixbridge (the token itself is only shown in the console)
     default: op
