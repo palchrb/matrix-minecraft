@@ -81,9 +81,15 @@ func (mc *MCConnector) Start(ctx context.Context) error {
 	mc.log.Info().Msg("Docker API connected")
 
 	avatarURL := mc.Config.AvatarAPIURL
+	// Starlight Skins (the old default) stopped serving renders, so treat
+	// configs that still point at it as "use the built-in renderer".
+	if strings.Contains(avatarURL, "starlightskins.lunareclipse.studio") {
+		mc.log.Info().Str("url", avatarURL).
+			Msg("Ignoring avatar_api_url pointing at the defunct Starlight Skins API")
+		avatarURL = ""
+	}
 	if avatarURL == "" {
-		avatarURL = "https://starlightskins.lunareclipse.studio/render/default/%s/bust"
-		mc.log.Info().Str("url", avatarURL).Msg("avatar_api_url not set, using default")
+		mc.log.Info().Msg("Rendering avatars from player skins (Mojang / GeyserMC)")
 	}
 	mc.avatarFetcher = NewAvatarFetcher(avatarURL, mc.log)
 

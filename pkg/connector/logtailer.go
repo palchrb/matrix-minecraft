@@ -248,7 +248,7 @@ func (t *LogTailer) tail(ctx context.Context, lineCh chan<- ChatLine) error {
 			t.log.Info().
 				Str("player", cl.PlayerName).
 				Int("event", int(cl.Event)).
-				Str("message", cl.Message).
+				Str("text", cl.Message).
 				Msg("LogTailer matched line")
 			select {
 			case lineCh <- *cl:

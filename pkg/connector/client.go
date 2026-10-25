@@ -209,7 +209,7 @@ func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bri
 		Name: &username,
 	}
 
-	// Fetch avatar from Starlight Skins API.
+	// Fetch avatar (rendered from the player's skin by default).
 	// Since AggressiveUpdateInfo is enabled, this is called on every message,
 	// so we check if the ghost already has an avatar set to avoid
 	// unnecessary HTTP calls (only re-check every 1 hour).
@@ -258,9 +258,18 @@ func (c *MCClient) GetUserInfo(ctx context.Context, ghost *bridgev2.Ghost) (*bri
 			} else {
 				c.log.Debug().Str("player", username).
 					Bool("changed", result.Changed).
-					Msg("Avatar unchanged (304)")
-				// No DB update needed on 304 — the existing ETag and TTL
-				// will naturally expire and trigger a new fetch later.
+					Msg("Avatar unchanged")
+				// Restart the TTL so we don't look the skin up again on
+				// every message once the first hour has passed.
+				info.ExtraUpdates = bridgev2.MergeExtraUpdaters(info.ExtraUpdates,
+					func(ctx context.Context, ghost *bridgev2.Ghost) bool {
+						meta, ok := ghost.Metadata.(*GhostMetadata)
+						if !ok {
+							return false
+						}
+						meta.AvatarFetchedAt = time.Now()
+						return true
+					})
 			}
 		}
 	}
@@ -803,7 +812,7 @@ func (c *MCClient) handleChatLine(line ChatLine) {
 	c.log.Info().
 		Str("player", line.PlayerName).
 		Str("container", line.ContainerName).
-		Str("message", line.Message).
+		Str("text", line.Message).
 		Int("event", int(line.Event)).
 		Msg("Minecraft event received, queueing to bridge")
 

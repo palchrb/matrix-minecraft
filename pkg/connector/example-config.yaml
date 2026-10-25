@@ -22,9 +22,10 @@ message_color: white
 # instead of here, to avoid the secret ending up in the config file
 provisioning_secret: ""
 
-# Avatar API URL (%s is replaced with MC username)
-# Starlight Skins supports both Java and Bedrock/Floodgate players
-avatar_api_url: "https://starlightskins.lunareclipse.studio/render/default/%s/bust"
+# Leave empty to render player avatars from their skins (Mojang for Java,
+# GeyserMC for Floodgate/Bedrock players). Set to a render service URL
+# (%s is replaced with the MC username) to use that instead.
+avatar_api_url: ""
 
 # Bridge all events (join/leave/death/advancement) in addition to chat.
 # Set to false to only bridge chat messages.
