@@ -279,8 +279,8 @@ func TestPluginDoesNotFollowRedirects(t *testing.T) {
 	defer redirector.Close()
 
 	p := newTestStream(t, redirector, "secret")
-	if _, err := p.Probe(context.Background()); err == nil {
-		t.Fatal("probe should fail on a redirect")
+	if _, err := p.Probe(context.Background()); err == nil || !strings.Contains(err.Error(), target.URL) {
+		t.Fatalf("probe should fail on a redirect and name the target, got %v", err)
 	}
 	if err := p.Send(context.Background(), "a", "b", SendFormat{}); err == nil {
 		t.Fatal("send should fail on a redirect")

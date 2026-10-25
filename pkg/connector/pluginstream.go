@@ -153,7 +153,7 @@ func (p *PluginStream) Probe(ctx context.Context) (*PluginInfo, error) {
 	if resp.StatusCode == http.StatusUnauthorized {
 		return nil, ErrUnauthorized
 	} else if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("plugin health check returned %s", resp.Status)
+		return nil, unexpectedStatus(resp)
 	}
 	var info PluginInfo
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&info); err != nil {
@@ -201,8 +201,21 @@ func (p *PluginStream) Send(ctx context.Context, sender, message string, format 
 		if e.Error != "" {
 			return fmt.Errorf("plugin returned %s: %s", resp.Status, e.Error)
 		}
-		return fmt.Errorf("plugin returned %s", resp.Status)
+		return unexpectedStatus(resp)
 	}
+}
+
+// unexpectedStatus describes a non-OK response. Redirects are never
+// followed (see NewPluginStream), so point at where it wanted to go: the
+// usual cause is entering http:// for a proxy that redirects to https://.
+func unexpectedStatus(resp *http.Response) error {
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		if loc := resp.Header.Get("Location"); loc != "" {
+			return fmt.Errorf("the URL redirects to %s (%s); redirects aren't followed, "+
+				"so add the server with the final URL instead", loc, resp.Status)
+		}
+	}
+	return fmt.Errorf("plugin returned %s", resp.Status)
 }
 
 // Status returns the current connection state.
@@ -283,7 +296,7 @@ func (p *PluginStream) stream(ctx context.Context, lineCh chan<- ChatLine,
 	if resp.StatusCode == http.StatusUnauthorized {
 		return false, ErrUnauthorized
 	} else if resp.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("plugin returned %s", resp.Status)
+		return false, unexpectedStatus(resp)
 	}
 	p.connected.Store(true)
 	p.setError(nil)
