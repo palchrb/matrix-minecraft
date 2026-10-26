@@ -156,7 +156,8 @@ func (l *MCAddServerLogin) Start(ctx context.Context) (*bridgev2.LoginStep, erro
 		Type:   bridgev2.LoginStepTypeUserInput,
 		StepID: "fi.mau.minecraft.add_server",
 		Instructions: "Connect a Minecraft server running the matrix-minecraft plugin. " +
-			"The token is shown in the server console with `/matrixbridge token`.",
+			"Get its token from the server console with `matrixbridge token` " +
+			"(or `docker exec <container> rcon-cli matrixbridge token`).",
 		UserInputParams: &bridgev2.LoginUserInputParams{
 			Fields: []bridgev2.LoginInputDataField{
 				{
@@ -218,7 +219,7 @@ func (l *MCAddServerLogin) SubmitUserInput(ctx context.Context,
 
 	info, err := NewPluginStream(cfg.URL, cfg.Token, cfg.ID, l.Connector.log).Probe(ctx)
 	if errors.Is(err, ErrUnauthorized) {
-		return nil, fmt.Errorf("the plugin at %s rejected the token; check `/matrixbridge token` in the server console", cfg.URL)
+		return nil, fmt.Errorf("the plugin at %s rejected the token; check `matrixbridge token` in the server console", cfg.URL)
 	} else if err != nil {
 		return nil, fmt.Errorf("couldn't reach the plugin at %s: %w", cfg.URL, err)
 	}

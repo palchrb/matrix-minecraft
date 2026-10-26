@@ -3,6 +3,22 @@ Made a stupid and overengineered bridge between minecraft and matrix... It start
 
 A Matrix-Minecraft bridge built on [mautrix-go](https://github.com/mautrix/go) bridgev2. A small companion plugin on each Minecraft server streams chat and game events (joins, deaths, advancements) to the bridge and shows Matrix messages in game. Servers are added from Matrix; the bridge needs no Docker socket and no RCON.
 
+## How it fits together
+
+```
+ Matrix room (E2EE)            matrix-minecraft bridge              Minecraft server
+┌──────────────────┐         ┌───────────────────────┐   HTTP(S)   ┌──────────────────────┐
+│ you + friends    │◄───────►│ mautrix bridgev2      │◄───────────►│ companion plugin     │
+│ ghost user per   │ appsvc  │ one room per server,  │  /events ◄─ │ (port 25580, token)  │
+│ Minecraft player │         │ servers added from    │  /send   ─► │ chat, joins, deaths, │
+└──────────────────┘         │ Matrix, stored in DB  │             │ advancements         │
+                             └───────────────────────┘             └──────────────────────┘
+```
+
+- The **plugin** runs on each Minecraft server. It streams game events to the bridge and shows Matrix messages in game. Every request needs its token, and it has no way to run commands.
+- The **bridge** connects to each plugin's URL. A bridge admin adds servers by chatting with the bridge bot; each server gets its own room in a "Minecraft" space.
+- **Everyone else** just joins the room. With relay mode on, their messages show up in game as `[Matrix] <Name> message`.
+
 ## Features
 
 - **Bidirectional chat** – Matrix messages show up in game, in-game chat shows up in Matrix
@@ -193,7 +209,29 @@ The plugin speaks plain HTTP. Pick whichever fits:
 
 - **Same Docker host:** put the bridge and the Minecraft containers on the same Docker network and use `http://<container-name>:25580`. Don't publish the port.
 - **LAN or Tailscale:** `http://<ip-or-name>:25580`.
-- **Over the internet:** put an HTTPS reverse proxy (Caddy, Traefik, nginx) in front of the port and use `https://...`. Turn off response buffering for the `/events` stream if your proxy buffers by default.
+- **Over the internet:** put an HTTPS reverse proxy (Caddy, Traefik, nginx) in front of the port and use `https://...`. A reverse proxy is fine; the bridge just won't follow HTTP *redirects*, so give it the final `https://` URL.
+
+`/events` is a long-lived stream with a keepalive every 15 seconds, so the proxy must not buffer it and must allow reads longer than that.
+
+Caddy works as is:
+
+```
+mc.example.com {
+    reverse_proxy minecraft-mc-1:25580
+}
+```
+
+nginx:
+
+```nginx
+location / {
+    proxy_pass http://minecraft-mc-1:25580;
+    proxy_buffering off;          # the plugin also sends X-Accel-Buffering: no
+    proxy_read_timeout 1h;
+}
+```
+
+To serve several servers from one hostname, give each a path (`location /survival/ { proxy_pass http://minecraft-s-mcs-1:25580/; }`) and add them as `https://mc.example.com/survival` and so on.
 
 The bridge refuses plain `http://` to public addresses, since the token would be sent unencrypted. It's allowed for loopback, private and Tailscale IPs, single-label names like Docker container names, and `.ts.net`/`.local`/`.lan`/`.internal`/`.home.arpa` names.
 
@@ -205,14 +243,50 @@ docker compose up -d matrix-minecraft
 
 ### 9. Set it up from Matrix
 
-Start a chat with the bridge bot (`@minecraftbot:example.com`). Only bridge admins (see permissions) can do this.
+Start a direct chat with the bridge bot (`@minecraftbot:example.com`). Only bridge admins (see permissions) can set things up. In that chat commands need no prefix; elsewhere, prefix them with `!minecraft` (the bridge's `command_prefix`).
 
-1. **Once:** `login provisioning-secret`, then enter the provisioning secret.
-2. **Per server:** `login add-server`, then enter the plugin URL, the token and a name for the room when the bot asks for them.
+**Once – authorize the bridge:**
 
-The bridge checks the URL and token right away, creates a room for the server in the Minecraft space and invites you. Invite whoever else should be in it; with relay mode on, their messages are bridged too. Token messages are redacted from the chat automatically.
+```
+you:  login provisioning-secret
+bot:  Enter the provisioning secret to authorize the Minecraft bridge.
+      Please enter your Provisioning Secret
+you:  ••••••••          (redacted automatically)
+bot:  Authorized. Now add a Minecraft server with `login add-server`.
+```
+
+**Per server – connect its plugin:**
+
+```
+you:  login add-server
+bot:  Connect a Minecraft server running the matrix-minecraft plugin. Get its token
+      from the server console with `matrixbridge token` (or `docker exec <container>
+      rcon-cli matrixbridge token`).
+      Please enter your Plugin URL
+      e.g. http://minecraft-mc-1:25580 on a Docker network, or https://mc.example.com
+      behind a reverse proxy
+you:  http://minecraft-mc-1:25580
+bot:  Please enter your Plugin token
+you:  ••••••••          (redacted automatically)
+bot:  Please enter your Room name
+      Name of the Matrix room for this server, e.g. Minecraft survival
+you:  Minecraft survival
+bot:  Connected to Paper 26.1.2.build.74-stable (A Minecraft Server) as server
+      `minecraft-mc-1`.
+      Room: https://matrix.to/#/!abc:example.com
+```
+
+The bridge checks the URL and token before saving anything, so a typo or wrong token gives an error right away. It then creates the server's room in the Minecraft space and invites you. `cancel` aborts a login that's waiting for input.
 
 Running `login add-server` again with the same URL updates the token or room name.
+
+**Who can do what:**
+
+| | Bridge admin | Everyone else in the room |
+|---|---|---|
+| Add/remove servers, `list-servers` | ✅ | – |
+| Chat with players | ✅ | ✅ with relay mode |
+| Invite people to the room | ✅ | depends on room power levels |
 
 Other commands:
 
