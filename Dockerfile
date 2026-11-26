@@ -1,4 +1,4 @@
-FROM golang:1-alpine3.23 AS builder
+FROM golang:1-alpine3.24 AS builder
 
 RUN apk add --no-cache git ca-certificates build-base su-exec olm-dev
 
@@ -17,12 +17,12 @@ RUN sed -i 's/\r$//' ./build.sh \
  && chmod +x ./build.sh \
  && ./build.sh
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 ENV UID=1337 \
     GID=1337
 
-RUN apk add --no-cache su-exec ca-certificates olm bash yq-go ffmpeg
+RUN apk add --no-cache su-exec ca-certificates olm bash yq-go
 
 COPY --from=builder /build/matrix-minecraft /usr/bin/matrix-minecraft
 COPY --from=builder /build/docker-run.sh /docker-run.sh
