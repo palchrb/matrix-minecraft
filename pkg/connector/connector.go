@@ -67,7 +67,7 @@ func (mc *MCConnector) Start(ctx context.Context) error {
 	mc.log.Info().Msg("Starting Minecraft connector")
 
 	if proc, ok := mc.br.Commands.(*commands.Processor); ok {
-		proc.AddHandlers(cmdListServers, cmdRemoveServer)
+		proc.AddHandlers(cmdListServers, cmdRemoveServer, cmdSetAvatar)
 	}
 
 	avatarURL := mc.Config.AvatarAPIURL

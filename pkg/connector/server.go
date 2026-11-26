@@ -21,6 +21,9 @@ type ServerConfig struct {
 	Name  string `json:"name"`
 	URL   string `json:"url"`
 	Token string `json:"token"`
+	// AvatarMXC is the room avatar set with "set-avatar". Empty means the
+	// bridge leaves the room avatar alone.
+	AvatarMXC string `json:"avatar_mxc,omitempty"`
 }
 
 // defaultPluginPort is left out of server IDs so http://host:25580 and
