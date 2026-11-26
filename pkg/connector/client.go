@@ -140,6 +140,16 @@ func (c *MCClient) getServer(serverID string) *mcServer {
 	return c.servers[serverID]
 }
 
+// serverConfig returns a copy of a running server's config.
+func (c *MCClient) serverConfig(serverID string) (ServerConfig, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if s, ok := c.servers[serverID]; ok {
+		return s.cfg, true
+	}
+	return ServerConfig{}, false
+}
+
 // ─── Server management ──────────────────────────────────────────────────────
 
 // ServerStatus is one row of list-servers.
@@ -156,6 +166,10 @@ func (c *MCClient) AddServer(ctx context.Context, cfg ServerConfig) (id.RoomID, 
 	meta := c.metadata()
 	idx := slices.IndexFunc(meta.Servers, func(s ServerConfig) bool { return s.ID == cfg.ID })
 	if idx >= 0 {
+		// Re-adding a server (new URL or token) keeps its avatar.
+		if cfg.AvatarMXC == "" {
+			cfg.AvatarMXC = meta.Servers[idx].AvatarMXC
+		}
 		meta.Servers[idx] = cfg
 	} else {
 		meta.Servers = append(meta.Servers, cfg)
@@ -189,6 +203,52 @@ func (c *MCClient) RemoveServer(ctx context.Context, serverID string) (bool, err
 		c.log.Info().Str("server", serverID).Msg("Server removed")
 	}
 	return removed, err
+}
+
+// SetServerAvatar stores a room avatar for a server and applies it to its
+// room right away. An empty mxc removes the avatar from the room. Returns
+// false if there is no such server.
+func (c *MCClient) SetServerAvatar(ctx context.Context, serverID string, mxc id.ContentURIString) (bool, error) {
+	c.mu.Lock()
+	meta := c.metadata()
+	idx := slices.IndexFunc(meta.Servers, func(s ServerConfig) bool { return s.ID == serverID })
+	if idx < 0 {
+		c.mu.Unlock()
+		return false, nil
+	}
+	meta.Servers[idx].AvatarMXC = string(mxc)
+	if s, ok := c.servers[serverID]; ok {
+		s.cfg.AvatarMXC = string(mxc)
+	}
+	err := c.UserLogin.Save(ctx)
+	c.mu.Unlock()
+	if err != nil {
+		return true, fmt.Errorf("failed to save server: %w", err)
+	}
+
+	portal, err := c.UserLogin.Bridge.GetExistingPortalByKey(ctx, makePortalKey(serverID))
+	if err != nil {
+		return true, fmt.Errorf("failed to get room: %w", err)
+	}
+	if portal == nil || portal.MXID == "" {
+		// Applied when the room is created.
+		return true, nil
+	}
+	avatar := roomAvatar(mxc)
+	if avatar == nil {
+		avatar = &bridgev2.Avatar{Remove: true}
+	}
+	portal.UpdateInfo(ctx, &bridgev2.ChatInfo{Avatar: avatar}, c.UserLogin, nil, time.Time{})
+	return true, nil
+}
+
+// roomAvatar builds the bridgev2 avatar for a stored MXC URI, or nil if
+// none is set. The ID includes the URI so a new avatar replaces the old one.
+func roomAvatar(mxc id.ContentURIString) *bridgev2.Avatar {
+	if mxc == "" {
+		return nil
+	}
+	return &bridgev2.Avatar{ID: networkid.AvatarID("mxc:" + string(mxc)), MXC: mxc}
 }
 
 // ListServers returns the configured servers and their connection state.
@@ -261,15 +321,21 @@ func (c *MCClient) startServer(ctx context.Context, cfg ServerConfig) id.RoomID 
 // ─── Matrix ↔ Minecraft ─────────────────────────────────────────────────────
 
 // GetChatInfo returns the ChatInfo for a portal. portal.ID is the server ID.
-// No avatar is set, so a room avatar chosen in Matrix is left alone.
+// The avatar is only included when one was set with "set-avatar", so a room
+// avatar chosen in a Matrix client is otherwise left alone.
 func (c *MCClient) GetChatInfo(ctx context.Context, portal *bridgev2.Portal) (*bridgev2.ChatInfo, error) {
 	name := string(portal.ID)
-	if s := c.getServer(string(portal.ID)); s != nil && s.cfg.Name != "" {
-		name = s.cfg.Name
+	var avatar *bridgev2.Avatar
+	if cfg, ok := c.serverConfig(string(portal.ID)); ok {
+		if cfg.Name != "" {
+			name = cfg.Name
+		}
+		avatar = roomAvatar(id.ContentURIString(cfg.AvatarMXC))
 	}
 	return &bridgev2.ChatInfo{
-		Name: &name,
-		Type: ptrTo(database.RoomTypeDefault),
+		Name:   &name,
+		Avatar: avatar,
+		Type:   ptrTo(database.RoomTypeDefault),
 		Members: &bridgev2.ChatMemberList{
 			IsFull: true,
 			Members: []bridgev2.ChatMember{{

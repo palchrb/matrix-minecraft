@@ -284,7 +284,7 @@ Running `login add-server` again with the same URL updates the token or room nam
 
 | | Bridge admin | Everyone else in the room |
 |---|---|---|
-| Add/remove servers, `list-servers` | ✅ | – |
+| Add/remove servers, `list-servers`, `set-avatar` | ✅ | – |
 | Chat with players | ✅ | ✅ with relay mode |
 | Invite people to the room | ✅ | depends on room power levels |
 
@@ -294,6 +294,11 @@ Other commands:
 |---------|-------------|
 | `list-servers` | Servers with their connection status and time of the last event |
 | `remove-server <id>` | Disconnect a server (its room is kept; `delete-portal` in the room removes it) |
+| `set-avatar <id>` as a reply to an image | Use that image as the server room's avatar (works in encrypted rooms too) |
+| `set-avatar <id> <mxc://…>` | Use an already uploaded image as the room avatar |
+| `set-avatar <id> none` | Remove the room avatar |
+
+In the server's own room the `<id>` can be left out (with the command prefix, by default `!minecraft set-avatar` as a reply to an image). If no avatar is set this way, the bridge leaves the room avatar alone, so one set directly in a Matrix client also works.
 
 #### Upgrading from Docker discovery
 
@@ -301,7 +306,7 @@ Earlier versions discovered servers through Docker labels and used RCON. After u
 
 1. Add the plugin to each server (step 6) and restart it.
 2. Run `login add-server` for each server with `http://<container-name>:25580`. The server ID is derived from the URL host, so it matches the old container-based ID and your existing rooms are reused.
-3. Remove the `/var/run/docker.sock` mount from the bridge and the `mc-bridge.*` labels from the Minecraft containers. RCON can stay enabled for itzg's own tools; the bridge no longer uses it.
+3. Remove the `/var/run/docker.sock` mount from the bridge and the `mc-bridge.*` labels from the Minecraft containers. RCON can stay enabled for itzg's own tools; the bridge no longer uses it. Room avatars set from the old `mc-bridge.avatar` label stay in place; to manage them from Matrix, run `set-avatar <id> <the same mxc:// URI>` once.
 
 ## Network Connector Config
 
