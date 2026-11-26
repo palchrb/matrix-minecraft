@@ -1,16 +1,17 @@
 # matrix-minecraft companion plugin.
 #
-# The bridge connects to http://<container-name>:<port>/events inside the
-# Docker network. Do not publish this port to the internet.
+# The bridge connects to http://<host>:<port> (or https:// through a reverse
+# proxy) and uses this endpoint both to receive game events and to show
+# Matrix messages in game. Add the server to the bridge by sending
+# "login add-server" to the bridge bot in Matrix.
 
 # Address and port to listen on. The MC_BRIDGE_PORT environment variable
-# overrides the port.
+# overrides the port. Plain HTTP: keep it on a private network (Docker,
+# Tailscale, LAN) or put an HTTPS reverse proxy in front of it.
 bind: 0.0.0.0
 port: 25580
 
-# Shared secret the bridge must send as "Authorization: Bearer <token>".
-# Leave empty to use the MC_BRIDGE_TOKEN environment variable, then
-# RCON_PASSWORD, then rcon.password from server.properties. The bridge
-# reads the same values from the container, so normally nothing needs to
-# be set here.
+# Secret the bridge must present. The MC_BRIDGE_TOKEN environment variable
+# takes precedence. Left empty, a random token is generated on first start
+# and written here; show it with /matrixbridge token.
 token: ""
